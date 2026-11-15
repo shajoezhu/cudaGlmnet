@@ -19,5 +19,6 @@ Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml
 Remotes: shajoezhu/rcupp
 VignetteBuilder: knitr
 Config/testthat/edition: 3
+Config/Needs/website: pkgdown
 Roxygen: list(markdown = TRUE, load = "source")
 Config/roxygen2/version: 8.1.0
