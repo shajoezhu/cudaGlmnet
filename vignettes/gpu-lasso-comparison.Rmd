@@ -1,0 +1,260 @@
+---
+title: "Third-party GPU lasso comparison and CUDA build notes"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Third-party GPU lasso comparison and CUDA build notes}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+```
+
+## Why this vignette exists
+
+`cudaGlmnet` fits the Gaussian lasso with a single FISTA solve executed by the
+low-level `rcupp` package. This document has two independent goals:
+
+1. **Numerical cross-check.** Compare our GPU coefficients against (a) the
+   dependency-free pure-R oracle `lasso_fista_cpu()` and (b) a genuinely
+   independent third-party GPU lasso, `cuda.ml::cuda_ml_lasso()` (RAPIDS cuML).
+   A third implementation rules out the possibility that the oracle and the
+   compiled path share the same mistake.
+2. **Build-system notes.** Show that `rcupp`'s optional-CUDA `configure` follows
+   the same pattern as `gputools` 2.1.0, and record how that pattern handles
+   multiple platforms (Linux toolkit vs conda layouts, Windows/WSL2, per-GPU
+   architecture).
+
+The two parts are deliberately decoupled: Part 1 needs a working GPU stack,
+Part 2 is pure documentation and always renders.
+
+## Part 1 - Numerical cross-check
+
+### Optional third-party backend
+
+`cuda.ml` is in `Suggests`, but its RAPIDS runtime is a large, separate download
+and is not present on most machines (including CRAN check machines). We guard
+against both the package and the runtime being absent. When it is unavailable the
+comparison code below is still shown, just not executed, and the rest of the
+vignette is unaffected.
+
+```{r backend-guard}
+HAS_CUML <- requireNamespace("cuda.ml", quietly = TRUE)
+if (HAS_CUML) {
+  info <- tryCatch(cuda.ml::cuda_ml_backend_info(), error = function(e) NULL)
+  HAS_CUML <- !is.null(info) && isTRUE(info$runtime_installed)
+}
+if (!HAS_CUML) {
+  message("cuda.ml GPU runtime not available: the third-party comparison ",
+          "is shown as code but not executed.")
+}
+HAS_CUML
+```
+
+### The oracle and our GPU fit
+
+Both solve the same objective
+`F(beta) = 1/(2n) ||y - X beta||^2 + lambda ||beta||_1` with no intercept and
+no standardization. These two always run: the compiled path falls back to the
+CPU reference shim when no CUDA backend was linked, so this works even on a
+machine without a GPU.
+
+```{r our-fit}
+set.seed(42)
+n <- 200L
+p <- 20L
+X <- matrix(rnorm(n * p), n, p)
+beta_true <- c(2.5, -1.5, rep(0, p - 2L))
+y <- drop(X %*% beta_true) + rnorm(n, sd = 0.4)
+lambda <- 0.05
+
+# one common objective, evaluated on any coefficient vector
+objective <- function(b) {
+  sum((y - drop(X %*% b))^2) / (2 * n) + lambda * sum(abs(b))
+}
+
+oracle <- lasso_fista_cpu(X, y, lambda = lambda)   # pure R
+fit    <- cuda_lasso(X, y, lambda = lambda)       # rcupp (GPU or CPU shim)
+
+cat(sprintf("backend                   : %s\n", fit$backend))
+cat(sprintf("max |cuda_lasso - oracle| : %.3e\n",
+            max(abs(fit$coefficients - oracle$coefficients))))
+```
+
+`lasso_fista_cpu()` and the compiled path share the numerical contract
+line-for-line (deterministic power iteration for `L`, the same FISTA momentum
+and soft-threshold), so the difference above is ~0 by construction.
+
+### Against `cuda.ml` (RAPIDS cuML)
+
+`cuda_ml_lasso.matrix()` fits lasso by **coordinate descent**, not FISTA, and
+uses cuML's own stopping rule and normalization. We therefore do **not** expect
+bit-identical coefficients; the meaningful checks are the common objective, the
+sparsity pattern, and the correlation of the coefficient vectors.
+
+To make the comparison fair we align the knobs with our model: `alpha = lambda`
+(cuda.ml documents its `alpha` as comparable to glmnet's `lambda`),
+`fit_intercept = FALSE`, a tight `tol`, and a large `max_iter`. Coefficients are
+read from `model$xptr$coef`, the same field `cuda_ml_get_state()` exposes.
+
+```{r cuml-compare, eval = HAS_CUML}
+cuml <- cuda.ml::cuda_ml_lasso(
+  X, y,
+  alpha         = lambda,
+  max_iter      = 10000L,
+  tol           = 1e-8,
+  fit_intercept = FALSE,
+  selection     = "cyclic"
+)
+b_cuml <- as.numeric(cuml$xptr$coef)
+
+knitr::kable(
+  data.frame(
+    method = c("lasso_fista_cpu (oracle)", "cuda_lasso (FISTA / GPU)",
+               "cuda_ml_lasso (cuML / CD)"),
+    objective = c(objective(oracle$coefficients),
+                  objective(fit$coefficients),
+                  objective(b_cuml)),
+    nonzero = c(sum(abs(oracle$coefficients) > 1e-6),
+                sum(abs(fit$coefficients) > 1e-6),
+                sum(abs(b_cuml) > 1e-6))
+  ),
+  digits = 8,
+  caption = "One objective, evaluated on all three coefficient vectors."
+)
+cat(sprintf("max |cuML - oracle| : %.3e\n",
+            max(abs(b_cuml - oracle$coefficients))))
+cat(sprintf("cor(cuML, oracle)   : %.6f\n",
+            cor(b_cuml, oracle$coefficients)))
+```
+
+Interpretation: the three objectives should agree to the solver tolerances, the
+non-zero count should match (the two planted signals, 2 of 20), and the
+correlation should be ~1. Small coefficient differences are expected because
+coordinate descent and FISTA approach the optimum differently. Because cuML's
+internal loss normalization is not identical to ours, we always re-evaluate the
+*same* objective above rather than trusting each solver's reported loss.
+
+#### Enabling the live comparison
+
+On a Linux x86_64 host with glibc >= 2.28, an NVIDIA driver >= 580 and R >= 4.1
+(per the `cuda.ml` DESCRIPTION):
+
+```r
+install.packages("cuda.ml")        # pure-R wrapper, no compilation
+cuda.ml::cuda_ml_install()         # downloads the RAPIDS cuML runtime
+cuda.ml::cuda_ml_backend_info()$runtime_installed   # should be TRUE
+```
+
+Then rebuild this vignette and the `cuml-compare` chunk runs for real.
+
+## Part 2 - CUDA build-system: gputools vs rcupp
+
+`gputools` 2.1.0 and `rcupp` implement the **same optional-CUDA pattern**. The
+point of this section is to make that pattern explicit and to note where
+`gputools` handles more platforms than `rcupp` currently does. Sources compared:
+the CRAN tarballs `gputools_2.1.0` and `cuda.ml_0.4.0`; the generated
+`gputools/src/Makevars` comes from `src/Makevars.in`, so that template and
+`INSTALL` are what we quote.
+
+### The shared skeleton
+
+1. An install-time `configure` at the package root **never fails** when CUDA is
+   absent.
+2. It renders `src/Makevars` from `src/Makevars.in` by substituting `@VAR@`
+   placeholders.
+3. `Makevars` selects the GPU objects or a single fallback object via a
+   column-0 `OBJECTS =` line, and adds an rpath to the toolkit libraries.
+4. A generated `Makevars` is excluded from the source tarball via
+   `.Rbuildignore`, and `cleanup` removes it after the build.
+5. Windows does not run `configure`; a `Makevars.win` (or the default object
+   list) builds the fallback only.
+
+`gputools/src/Makevars.in`:
+
+```make
+PKG_CPPFLAGS = -I. @CUDA_CPPFLAGS@
+PKG_LIBS = @CUDA_LIBS@
+OBJECTS = @GPUTOOLS_OBJECTS@
+```
+
+`rcupp/src/Makevars.in` (the same three substitutions, plus nvcc handling):
+
+```make
+CXX_STD = CXX17
+CUDA_HOME = @CUDA_HOME@
+NVCC = @NVCC@
+NVCCFLAGS = @NVCCFLAGS@
+PKG_CPPFLAGS = @CUDA_CPPFLAGS@
+PKG_LIBS = @CUDA_LIBS@
+OBJECTS = RcppExports.o rcupp_exports.o @EXTRA_OBJECTS@
+%.o: %.cu
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+```
+
+`gputools/src/Makevars.win` is the explicit Windows fallback:
+
+```make
+# Windows does not run configure, and gputools has no Windows CUDA build:
+# build only the fallback, whose GPU functions explain that.
+OBJECTS = nocuda.o
+```
+
+### Side-by-side
+
+| Aspect | gputools 2.1.0 | rcupp |
+|---|---|---|
+| `configure` source | autoconf: `configure.ac` -> generated 127 KB `configure` | hand-written ~80-line POSIX `sh` |
+| Rendering | `AC_CONFIG_FILES([src/Makevars src/nocuda-reason.h])` | `sed ... src/Makevars.in > src/Makevars` |
+| Fallback object | `nocuda.o` (GPU functions stop with an explanatory error) | `cpu_stub.o` (same C ABI, a CPU numerical oracle) |
+| Detection order | `--with-cuda-include` / `--with-cuda-lib`, `--with-cuda-home`, `CUDA_HOME`, `CUDA_PATH`, dir above `nvcc`, `/usr/local/cuda` | `--with-cuda-home`, `CUDA_HOME`, `CUDA_PATH`, `nvcc` on PATH, `/usr/local/cuda` |
+| Toolkit validation | `AC_CHECK_HEADERS` (cuda.h, cuda_runtime.h, nvrtc.h, cublas_v2.h, cusolverDn.h), `AC_SEARCH_LIBS` (cudart, nvrtc, cublas, cusolver), `CUDART_VERSION >= 11070` | file checks: executable `nvcc`, `cuda_runtime.h`, `libcudart.so*` |
+| Conda layout | `targets/<arch>/include`, `lib/`, `targets/*/lib` | not handled (toolkit `include/`, `lib64/` only) |
+| Compiled objects | every `src/*.cpp` except `nocuda.cpp` | fixed operator objects: `gpu_ops.o`, `lasso_fista_cuda.o` |
+| GPU architecture | NVRTC compiles `inst/cuda/*.cu` at **runtime** for the current GPU (first call slower) | `nvcc -gencode arch=compute_89,code=sm_89` at **install** time (`RCUPP_CUDA_ARCH` overrides) |
+| Windows | `src/Makevars.win` -> `nocuda.o`; recommends WSL2 | no `configure` -> CPU shim; CUDA needs WSL2 |
+| Link flags | `-Wl,-rpath,${cuda_lib} ${LIBS}` | `-Wl,-rpath,$CUDA_LIBDIR -lcudart -lcublas` |
+| `cleanup` | removes `*.o *.so Makevars config.log config.status autom4te.cache nocuda-reason.h` | removes `src/Makevars` |
+
+### Multi-platform lessons from `gputools/INSTALL`
+
+`gputools/INSTALL` spells out the portability story that both packages share:
+the package "installs and loads without" a toolkit, reports `"installed WITHOUT
+CUDA"` loudly when `configure` cannot find one, and simply errors inside GPU
+functions at run time. Its detection order matches `rcupp`'s, with two extra
+capabilities worth adopting:
+
+- **Split include/lib overrides and conda layouts.** `--with-cuda-include` /
+  `--with-cuda-lib`, and `CUDA_HOME=$CONDA_PREFIX` with
+  `targets/<arch>/include` + `lib/`, cover conda and non-standard installs.
+  `rcupp` currently assumes a single toolkit root with `include/` and `lib64/`.
+- **Real probes instead of file existence.** `AC_CHECK_HEADERS`,
+  `AC_SEARCH_LIBS` and the `CUDART_VERSION` compile test catch a partial or
+  too-old toolkit that would otherwise fail at link time; `rcupp` only checks
+  that a few files exist.
+
+`gputools` also documents the two platform facts that matter here: Windows has
+no native CUDA build (use WSL2, which is exactly how this project's GPU build
+runs), and NVRTC runtime compilation avoids baking a single GPU architecture
+into the binary. `rcupp` deliberately differs on both: as a *fixed* GPU operator
+library it compiles its small `.cu` set statically with `nvcc` at install time
+(no NVRTC, no first-call cost), and exposes `RCUPP_CUDA_ARCH` as the escape
+hatch for other cards. Adding a `Makevars.win`, conda-layout probing, and
+per-architecture `gencode` lists are the natural next steps if `rcupp` grows
+beyond a single workstation.
+
+### Takeaway
+
+The "detect CUDA, render `Makevars`, keep a CPU fallback, never fail the
+install" pattern is not ad hoc - it is the same one `gputools` ships on CRAN.
+`rcupp` is a deliberately smaller instance of it: a fixed operator ABI, a
+numerical-oracle fallback rather than a stub, and static `nvcc` compilation.
+That makes the two-layer `rcupp` + `cudaGlmnet` design installable and
+`R CMD check`-clean on any machine, while still linking the real GPU backend
+where a toolkit and an NVIDIA GPU are present.
+
+```{r session-info, echo = FALSE}
+sessionInfo()
+```

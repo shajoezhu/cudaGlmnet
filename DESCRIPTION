@@ -1,0 +1,23 @@
+Package: cudaGlmnet
+Type: Package
+Title: Minimal GPU Gaussian Lasso via rcupp
+Version: 0.0.0.9000
+Authors@R: person("Joe", "Zhu", email = "sha.joe.zhu@gmail.com", role = c("aut", "cre"))
+Author: Joe Zhu [aut, cre]
+Maintainer: Joe Zhu <sha.joe.zhu@gmail.com>
+Description: A glmnet-like interface for the Gaussian lasso solved by GPU
+    FISTA through the low-level 'rcupp' package. Provides lambda paths,
+    cross-validation, standardization and an intercept, with coef/predict
+    methods using glmnet-style 's' selection. The single fixed-lambda
+    cuda_lasso() entry point is retained as the numerical reference path.
+    Sparse x, other families and elastic-net mixing are future work.
+License: Apache License 2.0
+Encoding: UTF-8
+Language: en-US
+Imports: rcupp, stats
+Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml
+Remotes: shajoezhu/rcupp
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+Roxygen: list(markdown = TRUE, load = "source")
+Config/roxygen2/version: 8.1.0

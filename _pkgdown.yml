@@ -1,0 +1,33 @@
+destination: ../docs/cudaGlmnet
+
+template:
+  bootstrap: 5
+
+reference:
+- title: Fit a lasso path
+  contents:
+  - cuda_glmnet
+  - cv.cuda_glmnet
+- title: Single-lambda reference path
+  contents:
+  - cuda_lasso
+  - lasso_fista_cpu
+- title: Methods
+  contents:
+  - coef.cuda_glmnet
+  - coef.cuda_lasso
+  - coef.cv.cuda_glmnet
+  - predict.cuda_glmnet
+  - predict.cuda_lasso
+  - predict.cv.cuda_glmnet
+  - print.cuda_glmnet
+  - print.cuda_lasso
+  - print.cv.cuda_glmnet
+
+articles:
+- title: Get started
+  contents:
+  - getting-started
+- title: Background
+  contents:
+  - gpu-lasso-comparison

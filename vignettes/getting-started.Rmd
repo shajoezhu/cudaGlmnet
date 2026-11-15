@@ -1,0 +1,64 @@
+---
+title: "Getting started with cudaGlmnet"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with cudaGlmnet}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+```
+
+`cudaGlmnet` fits the Gaussian lasso with a glmnet-like interface on top of
+the GPU FISTA solver in `rcupp`. This vignette covers the lambda path,
+coefficient selection and cross-validation.
+
+## A lambda path
+
+```{r path}
+set.seed(1)
+X <- matrix(rnorm(60 * 5), 60, 5)
+y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(60, sd = 0.5)
+
+fit <- cuda_glmnet(X, y, nlambda = 10)
+length(fit$lambda)
+fit$lambda[1:3]
+```
+
+By default the columns are scaled and an intercept is fitted; coefficients
+are mapped back to the original scale. Select a penalty with the glmnet-style
+`s` argument:
+
+```{r coef}
+coef(fit, s = fit$lambda[5])
+predict(fit, X[1:3, ], s = fit$lambda[5])
+```
+
+## Cross-validation
+
+```{r cv}
+cv <- cv.cuda_glmnet(X, y, nlambda = 8, nfolds = 3)
+cv$lambda.min
+cv$lambda.1se
+coef(cv, s = "lambda.1se")
+```
+
+`cv.cuda_glmnet()` returns the full path plus the cross-validated error, so
+`coef()` and `predict()` accept the same `s` values as the plain fit.
+
+## The reference path
+
+For a single fixed penalty, `cuda_lasso()` calls the compiled solver once and
+`lasso_fista_cpu()` is a dependency-free pure-R oracle that reproduces the
+same numbers. Both are useful when checking the numerical contract.
+
+```{r reference}
+ref <- lasso_fista_cpu(X, y, lambda = 0.05)
+head(ref$coefficients, 3)
+```
+
+The comparison vignette in this package covers the third-party GPU solver and
+the CUDA build notes in more detail.
