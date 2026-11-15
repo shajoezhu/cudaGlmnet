@@ -203,8 +203,9 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
   rcupp::session_set_data(s, prep$Xs, prep$ys)
   on.exit(rcupp::session_destroy(s), add = TRUE)
 
-  fits <- lapply(lambda, function(l)
-    .cg_fit_one(prep, l, max_iter, tol, session = s, warm_start = warm_start))
+  fits <- lapply(lambda, function(l) {
+    .cg_fit_one(prep, l, max_iter, tol, session = s, warm_start = warm_start)
+  })
   # matrix() keeps beta a p x L matrix even when p == 1 (vapply would collapse).
   beta <- matrix(unlist(lapply(fits, `[[`, "beta"), use.names = FALSE),
                  nrow = prep$p, ncol = L)

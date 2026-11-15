@@ -9,7 +9,8 @@ test_that("cuda_glmnet default (cold session) is bit-identical to one-shot", {
   lam <- 0.05
   fit <- cuda_glmnet(d$X, d$y, lambda = lam)
   prep <- cudaGlmnet:::.cg_prep(d$X, d$y, TRUE, TRUE)
-  one <- cudaGlmnet:::.cg_fit_one(prep, lam, 1000L, 1e-6)  # session = NULL
+  # One-shot reference solve (no persistent session).
+  one <- cudaGlmnet:::.cg_fit_one(prep, lam, 1000L, 1e-6)
 
   # cold session fit == the original one-shot solve, element by element
   expect_equal(as.numeric(fit$beta[, 1L]), one$beta, tolerance = 1e-12)
@@ -41,7 +42,8 @@ test_that("warm_start input is validated", {
 test_that("cv.cuda_glmnet cold session equals a manual one-shot CV", {
   set.seed(5)
   path <- c(0.2, 0.1, 0.05, 0.02)
-  n <- nrow(d$X); L <- length(path)
+  n <- nrow(d$X)
+  L <- length(path)
   foldid <- sample(rep_len(1:3, n))
   cv <- cv.cuda_glmnet(d$X, d$y, lambda = path, foldid = foldid,
                        warm_start = FALSE)
