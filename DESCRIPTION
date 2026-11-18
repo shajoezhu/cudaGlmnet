@@ -15,7 +15,7 @@ License: Apache License 2.0
 Encoding: UTF-8
 Language: en-US
 Imports: rcupp, stats
-Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml
+Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml, glmnet
 Remotes: shajoezhu/rcupp
 VignetteBuilder: knitr
 Config/testthat/edition: 3

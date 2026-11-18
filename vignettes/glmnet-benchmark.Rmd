@@ -1,0 +1,169 @@
+---
+title: "Benchmark: cudaGlmnet against glmnet"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Benchmark: cudaGlmnet against glmnet}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+HAS_GLMNET <- requireNamespace("glmnet", quietly = TRUE)
+HAS_CUDA <- isTRUE(rcupp::cuda_available())
+RUN <- HAS_GLMNET && HAS_CUDA
+```
+
+```{r status, echo = FALSE}
+if (!RUN) {
+  cat("Live benchmark skipped: needs glmnet and a CUDA backend.\n")
+}
+```
+
+This vignette measures the wall time of a Gaussian lasso lambda path fitted
+by `glmnet` and by `cuda_glmnet()`. It reports the numbers as measured,
+including the cases where `glmnet` is faster.
+
+Two rules keep the comparison fair:
+
+1. Both solvers get the **same explicit lambda grid**. `glmnet()` stops its
+   default path early (on the companion example it fitted 15 of 20 planned
+   values), so letting each build its own path would time different amounts
+   of work.
+2. Before timing, the coefficients at a mid-path lambda are compared. If
+   they disagreed, the two solvers would not be doing comparable work. The
+   `glmnet-comparison` vignette establishes that they agree.
+
+Only the CUDA backend is timed. On a machine without a CUDA toolkit `rcupp`
+builds a CPU reference shim; those timings are not representative of the GPU
+path and are deliberately excluded. The live chunk is therefore guarded by
+`requireNamespace("glmnet")` and `rcupp::cuda_available()`.
+
+## Method
+
+- One synthetic dataset per configuration, `n x p`, with five planted
+  nonzero coefficients and Gaussian noise.
+- A shared 30-value log-spaced grid from `lambda.max` down to
+  `lambda.max * 1e-3`, where `lambda.max` follows the common `1/(2n)`
+  convention after removing column means and scaling columns to unit
+  population variance.
+- Default model settings on both sides: `standardize = TRUE`,
+  `intercept = TRUE`. `glmnet` uses its default `thresh`, `cuda_glmnet()`
+  its default `tol = 1e-6`.
+- One warm-up call per solver, then the median elapsed time of three
+  repetitions via `system.time()`.
+- Three variants: `glmnet`, `cuda_glmnet()` cold start (the default), and
+  `cuda_glmnet(warm_start = TRUE)`.
+
+## Reference measurement
+
+Measured 2026-11-18 on a machine with an NVIDIA RTX 4070 Laptop GPU (8 GB),
+CUDA Toolkit 13.1, R 4.6.1, glmnet 5.2 and cudaGlmnet 0.0.0.9002 (GPU
+backend). Wall times in seconds; `cuda / glmnet` is how many times slower
+the cold-start GPU path is.
+
+| n | p | lambdas | glmnet (s) | cudaGlmnet (s) | warm_start (s) | cuda / glmnet | max coef diff |
+|---|---|---|---|---|---|---|---|
+| 200 | 50 | 30 | 0.002 | 0.568 | 0.363 | 284.0x | 1.0e-05 |
+| 1000 | 100 | 30 | 0.003 | 0.357 | 0.254 | 119.0x | 6.6e-06 |
+| 2000 | 200 | 30 | 0.012 | 0.448 | 0.278 | 37.3x | 1.1e-06 |
+| 5000 | 200 | 30 | 0.037 | 0.318 | 0.263 | 8.6x | 8.7e-07 |
+
+These are a snapshot, not a performance guarantee: they depend on the GPU,
+the CUDA toolkit and the package versions. The chunk below regenerates them
+on any machine with a CUDA backend.
+
+## Reproduce the benchmark
+
+```{r benchmark, eval = RUN}
+make_data <- function(n, p) {
+  set.seed(42)
+  X <- matrix(rnorm(n * p), n, p)
+  beta <- rep(0, p)
+  beta[1:5] <- c(2, -1.5, 1, -0.5, 0.75)
+  list(X = X, y = drop(X %*% beta) + rnorm(n, sd = 0.5))
+}
+
+common_lambda <- function(X, y, nlambda = 30L) {
+  Xc <- X - matrix(colMeans(X), nrow(X), ncol(X), byrow = TRUE)
+  xs <- sqrt(colMeans(Xc^2))
+  Xs <- Xc / matrix(xs, nrow(X), ncol(X), byrow = TRUE)
+  lmax <- max(abs(crossprod(Xs, y - mean(y)))) / nrow(X)
+  exp(seq(log(lmax), log(lmax * 1e-3), length.out = nlambda))
+}
+
+time_median <- function(f, reps = 3L) {
+  f()
+  median(replicate(reps, system.time(f())[["elapsed"]]))
+}
+
+configs <- data.frame(n = c(200L, 1000L, 2000L, 5000L),
+                      p = c(50L, 100L, 200L, 200L))
+
+rows <- lapply(seq_len(nrow(configs)), function(i) {
+  d <- make_data(configs$n[i], configs$p[i])
+  lam <- common_lambda(d$X, d$y)
+
+  j <- length(lam) %/% 2L
+  g0 <- glmnet::glmnet(d$X, d$y, lambda = lam)
+  c0 <- cuda_glmnet(d$X, d$y, lambda = lam)
+  b_g <- as.matrix(stats::coef(g0, s = lam[j]))
+  b_c <- coef(c0, s = lam[j])
+  max_diff <- max(abs(b_g - b_c))
+  stopifnot(max_diff < 1e-3)
+
+  t_g <- time_median(function() glmnet::glmnet(d$X, d$y, lambda = lam))
+  t_c <- time_median(function() cuda_glmnet(d$X, d$y, lambda = lam))
+  t_w <- time_median(function() {
+    cuda_glmnet(d$X, d$y, lambda = lam, warm_start = TRUE)
+  })
+
+  data.frame(n = configs$n[i], p = configs$p[i], lambdas = length(lam),
+             glmnet_s = sprintf("%.3f", t_g),
+             cuda_s = sprintf("%.3f", t_c),
+             cuda_warm_s = sprintf("%.3f", t_w),
+             cuda_over_glmnet = sprintf("%.1fx", t_c / t_g),
+             max_coef_diff = sprintf("%.1e", max_diff))
+})
+
+knitr::kable(do.call(rbind, rows),
+             caption = "Wall time (median of 3) for one 30-lambda path.")
+```
+
+## Interpreting the numbers
+
+`glmnet` is faster across every configuration tested. Its Gaussian path is
+solved by coordinate descent in a single compiled call, with warm starts
+along the path: the number of passes per lambda falls steeply as the penalty
+decreases. `cuda_glmnet()` instead runs one FISTA solve per lambda. By
+default each is a cold start, including a power iteration for the Lipschitz
+constant, plus an R-to-C++ call and R-level bookkeeping (coefficient
+assembly and `dev.ratio`) for every lambda. At these matrix sizes GPU
+throughput never makes up for that overhead.
+
+`warm_start = TRUE` cuts the path time by roughly a third, since the cached
+Lipschitz constant and the previous solution are reused. It is the better
+setting for a full path, though still slower than `glmnet` here.
+
+The gap narrows when the dense work per solve grows. On a single low-level
+solve with no path bookkeeping (`rcupp::lasso_fista()` against `glmnet()` at
+one lambda), `n = 5000, p = 1000` measured 0.073 s for the GPU solver
+against 0.058 s for `glmnet`. The persistent session in `cuda_glmnet()` also
+keeps the design matrix resident on the device for the whole path, which
+removes repeated uploads across many fits.
+
+The honest conclusion for these workloads: `glmnet` is the faster choice for
+whole lambda paths. `cudaGlmnet` is a fixed-operator GPU FISTA bridge with a
+persistent-device session, not yet a faster drop-in replacement for
+`glmnet`'s path algorithm. This vignette is a measurement, not a performance
+claim.
+
+## Enabling the live benchmark
+
+The chunk above runs only when `glmnet` is installed and
+`rcupp::cuda_available()` is `TRUE`. CI runners have no CUDA Toolkit, so
+`rcupp` builds its CPU reference shim there and the chunk is skipped; the
+reference table above is a static snapshot from a GPU machine. See the CUDA
+build notes in the `gpu-lasso-comparison` vignette for how to link the GPU
+backend.

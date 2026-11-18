@@ -28,6 +28,8 @@ articles:
 - title: Get started
   contents:
   - getting-started
+  - glmnet-comparison
+  - glmnet-benchmark
 - title: Background
   contents:
   - gpu-lasso-comparison

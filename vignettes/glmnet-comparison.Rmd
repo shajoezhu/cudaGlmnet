@@ -1,0 +1,129 @@
+---
+title: "Comparing cudaGlmnet with glmnet"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Comparing cudaGlmnet with glmnet}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+HAS_GLMNET <- requireNamespace("glmnet", quietly = TRUE)
+if (!HAS_GLMNET) {
+  message("glmnet is not installed: the comparison chunks are shown ",
+          "but not run.")
+}
+```
+
+`cudaGlmnet` and `glmnet` fit the same Gaussian lasso problem
+
+`F(beta) = 1/(2n) ||y - a0 - X beta||^2 + lambda ||beta||_1`
+
+Both fit an unpenalised intercept, scale the columns to unit population
+(`1/n`) variance, and return coefficients on the original scale. `glmnet`
+solves the objective by coordinate descent; `cuda_glmnet()` uses GPU FISTA
+through `rcupp`. Same convex problem, different algorithm, so the two agree
+to solver tolerance rather than bit-for-bit. This vignette checks that on
+one small example.
+
+`glmnet` is in `Suggests`. When it is not installed the comparison chunks
+below are shown but not evaluated, so the vignette still renders.
+
+## One lasso fit, two packages
+
+```{r data}
+set.seed(1)
+X <- matrix(rnorm(60 * 5), 60, 5)
+y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(60, sd = 0.5)
+lambda <- 0.05
+```
+
+Both calls use their defaults (`standardize = TRUE`, `intercept = TRUE`)
+and the same penalty `lambda`:
+
+```{r fits, eval = HAS_GLMNET}
+g  <- glmnet::glmnet(X, y, lambda = lambda)
+cg <- cuda_glmnet(X, y, lambda = lambda)
+```
+
+`coef()` returns an intercept row plus one row per variable in both
+packages:
+
+```{r coefs, eval = HAS_GLMNET}
+b_glmnet <- as.matrix(stats::coef(g, s = lambda))
+b_cuda   <- coef(cg, s = lambda)
+
+knitr::kable(
+  data.frame(
+    term      = rownames(b_cuda),
+    glmnet    = drop(b_glmnet),
+    cudaGlmnet = drop(b_cuda)
+  ),
+  digits = 6,
+  caption = "Gaussian lasso coefficients at lambda = 0.05."
+)
+```
+
+The largest coefficient difference is at the solver tolerance, not at the
+scale of the estimates:
+
+```{r difference, eval = HAS_GLMNET}
+max_diff <- max(abs(b_glmnet - b_cuda))
+cat(sprintf("max |glmnet - cudaGlmnet| = %.3e\n", max_diff))
+stopifnot(max_diff < 1e-3)
+```
+
+Predictions agree for the same reason:
+
+```{r predictions, eval = HAS_GLMNET}
+p_glmnet <- drop(as.matrix(stats::predict(g, X[1:5, ], s = lambda)))
+p_cuda   <- drop(predict(cg, X[1:5, ], s = lambda))
+cat(sprintf("max |prediction difference| = %.3e\n",
+            max(abs(p_glmnet - p_cuda))))
+```
+
+## A short lambda path
+
+`cuda_glmnet()` also accepts the glmnet-style `s` selection, so a whole
+path can be compared at shared penalty values without refitting:
+
+```{r path, eval = HAS_GLMNET}
+grid <- c(0.20, 0.10, 0.05)
+g_path  <- glmnet::glmnet(X, y, lambda = grid)
+cg_path <- cuda_glmnet(X, y, lambda = grid)
+
+B_glmnet <- as.matrix(stats::coef(g_path, s = grid))
+B_cuda   <- coef(cg_path, s = grid)
+cat(sprintf("lambda path             : %s\n",
+            paste(sprintf("%.3f", grid), collapse = ", ")))
+cat(sprintf("max |coef difference|   : %.3e\n",
+            max(abs(B_glmnet - B_cuda))))
+cat(sprintf("non-zero counts agree   : %s\n",
+            identical(as.integer(colSums(abs(B_glmnet[-1L, ]) > 1e-8)),
+                      as.integer(colSums(abs(B_cuda[-1L, ]) > 1e-8)))))
+```
+
+## Why the numbers are not bit-identical
+
+Coordinate descent and FISTA approach the same optimum from different
+directions, and each stops at its own convergence threshold (`glmnet`'s
+`thresh` and `cuda_glmnet()`'s `tol`). Tightening our solver's tolerance
+shrinks the gap by roughly two orders of magnitude:
+
+```{r tighter, eval = HAS_GLMNET}
+cg_tight  <- cuda_glmnet(X, y, lambda = lambda, tol = 1e-10)
+b_tight   <- coef(cg_tight, s = lambda)
+d_default <- max_diff
+d_tight   <- max(abs(b_glmnet - b_tight))
+cat(sprintf("default tol (1e-6) : %.3e\n", d_default))
+cat(sprintf("tol = 1e-10        : %.3e\n", d_tight))
+```
+
+## Takeaway
+
+For the Gaussian family, a `cuda_glmnet()` fit is the same lasso solution
+as `glmnet::glmnet()`: same intercept, same standardisation, same
+coefficients and same predictions at a shared `lambda`. The residual
+difference is solver tolerance, not a different model.

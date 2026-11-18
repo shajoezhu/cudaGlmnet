@@ -60,5 +60,8 @@ ref <- lasso_fista_cpu(X, y, lambda = 0.05)
 head(ref$coefficients, 3)
 ```
 
-The comparison vignette in this package covers the third-party GPU solver and
-the CUDA build notes in more detail.
+The `glmnet-comparison` vignette checks that a `cuda_glmnet()` fit matches
+`glmnet::glmnet()` for the Gaussian lasso, and the `glmnet-benchmark`
+vignette measures their wall time on a shared lambda path. The
+`gpu-lasso-comparison` vignette covers the third-party GPU solver and the
+CUDA build notes in more detail.
