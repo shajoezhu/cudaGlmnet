@@ -1,6 +1,6 @@
-# cudaGlmnet
+# cudaGlmnet <a href='https://github.com/shajoezhu/cudaGlmnet'><img src="man/figures/logo.png" align="right" height="160" alt="cudaGlmnet hexsticker" /></a>
 
-<img src="man/figures/logo.png" align="right" height="160" alt="cudaGlmnet hexsticker" />
+<!-- start badges -->
 
 [![Check](https://github.com/shajoezhu/cudaGlmnet/actions/workflows/check.yaml/badge.svg)](https://github.com/shajoezhu/cudaGlmnet/actions/workflows/check.yaml)
 

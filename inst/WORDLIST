@@ -6,12 +6,15 @@ Conda
 cublas
 cuda
 CUDA
+cudaBio
+cudaFin
 cudart
 cuML
 cuML's
 cusolver
 cusolverDn
 FISTA
+github
 glibc
 glmnet
 glmnet's
@@ -21,6 +24,7 @@ Lipschitz
 nvcc
 nvrtc
 NVRTC
+Rcpp
 rcupp
 roadmap
 rpath
