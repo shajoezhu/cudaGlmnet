@@ -1,12 +1,13 @@
 name: 'Development version bump'
 description: >-
-  Bump the .900x development version in this package's DESCRIPTION, then
-  commit and push the change back to the current branch. Uses the credentials
-  persisted by actions/checkout, so no extra secret is required.
+  Bump the .900x development version in this package's DESCRIPTION, prepend a
+  matching NEWS.md section, then commit and push both files back to the current
+  branch. Uses the credentials persisted by actions/checkout, so no extra
+  secret is required.
 runs:
   using: 'composite'
   steps:
-    - name: Bump DESCRIPTION version
+    - name: Bump DESCRIPTION version and NEWS.md
       shell: bash
       run: |
         set -euo pipefail
@@ -23,14 +24,32 @@ runs:
           exit 1
         fi
         new="${prefix}.$((10#$last + 1))"
+        pkg="$(sed -n 's/^Package:[[:space:]]*//p' "$f")"
         sed -i "s/^Version:.*/Version: ${new}/" "$f"
         echo "$f: $old -> $new"
+
+        news="NEWS.md"
+        header="# ${pkg} ${new}"
+        if [ -f "$news" ] && grep -qF "$header" "$news"; then
+          echo "$news already has a section for ${new}; leaving it unchanged."
+        elif [ -f "$news" ]; then
+          {
+            printf '# %s %s\n\n* Development version bumped from %s.\n\n' \
+              "$pkg" "$new" "$old"
+            cat "$news"
+          } > "${news}.tmp" && mv "${news}.tmp" "$news"
+          echo "$news: added section for ${new}"
+        else
+          printf '# %s %s\n\n* Development version bumped from %s.\n' \
+            "$pkg" "$new" "$old" > "$news"
+          echo "$news: created with section for ${new}"
+        fi
 
     - name: Commit and push
       shell: bash
       run: |
         set -euo pipefail
-        git add -- DESCRIPTION
+        git add -- DESCRIPTION NEWS.md
         if git diff --cached --quiet; then
           echo "No version change to commit."
           exit 0
