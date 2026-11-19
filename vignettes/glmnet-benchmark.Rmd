@@ -26,7 +26,9 @@ by `glmnet` and by `cuda_glmnet()`. It reports the numbers as measured,
 including the cases where `glmnet` is faster. A separate section then shows
 where the GPU backend is unambiguously faster: against the package's own
 pure-R reference solver, the baseline used by the companion benchmark. The
-two baselines differ, so the two sections answer different questions.
+two baselines differ, so the two sections answer different questions. The
+positive result is genuine but scoped: a win over interpreted R on large
+single solves, not a win over `glmnet`.
 
 Two rules keep the comparison fair:
 
@@ -165,7 +167,15 @@ claim.
 The next section changes the baseline and shows where the GPU backend does
 win clearly: against a pure-R implementation of the same algorithm.
 
-## Where the GPU backend is faster
+## Where the GPU backend is faster (large single solves)
+
+**Result up front.** On one large fixed-lambda solve the compiled GPU FISTA
+is clearly faster than the same algorithm written in pure R, and the margin
+grows with matrix size: about 1.6x at the smallest configuration and about
+26x at the largest in the snapshot below. This is the workload the GPU
+backend is built for: one big dense solve with no per-lambda R-level
+bookkeeping. Keep the baseline in mind: it is the pure-R reference solver,
+not `glmnet`.
 
 The comparison above is deliberately hard: `glmnet` solves the whole path
 with compiled Fortran coordinate descent. `cudaGlmnet` also ships
@@ -189,12 +199,49 @@ to roughly 1e-16, so both solvers do the same work.
 | 5000 | 1000 | 1.118 | 0.060 | 18.6x | 4.4e-16 |
 | 10000 | 1000 | 2.851 | 0.110 | 25.9x | 4.4e-16 |
 
+```{r speedup-plot, echo = FALSE, fig.width = 6, fig.height = 4}
+nn <- c(1000L, 2000L, 5000L, 10000L)
+pp <- c(500L, 1000L, 1000L, 1000L)
+speedups <- c(1.6, 5.8, 18.6, 25.9)
+m <- nn * pp / 1e6
+plot(m, speedups, type = "b", pch = 19, col = "steelblue", lwd = 2,
+     xlab = "Matrix size (n x p, millions of entries)",
+     ylab = "GPU speedup vs pure-R FISTA (x)",
+     main = "GPU advantage grows with problem size")
+abline(h = 1, lty = 2, col = "grey40")
+```
+
+The dashed line marks parity (1x): every measured configuration sits above
+it, and the curve rises as the matrix grows. The figure plots the static
+snapshot above, so it renders even when the live benchmark is skipped.
+
 Read the speedup against the right baseline: it says the compiled GPU solver
 is up to 26x faster than a pure-R implementation of the same FISTA, not that
 it is faster than `glmnet`. `glmnet` remains the faster choice for end-to-end
 Gaussian lasso paths, as the table earlier in this vignette shows.
 
+### Reading the timings honestly
+
+These are snapshots, not guarantees. On a laptop, and on WSL in particular,
+GPU wall time depends strongly on warm-up: a cold device runs at low clocks
+and the first several solves are several times slower until the driver ramps
+up. The live chunk below warms the device before timing for that reason.
+Host load and the pure-R side vary too, so the exact speedup on any single
+run can move by a wide margin. What is stable is the qualitative result: one
+large dense solve is faster on the GPU than the same algorithm in
+interpreted R, and the gap widens as the matrix grows. Treat the table as an
+illustrative measurement, not a fixed number to quote as a benchmark.
+
 ```{r gpu-vs-oracle, eval = RUN}
+# WSL/CUDA ramps GPU clocks lazily. Warm the device before timing so the
+# numbers reflect steady state rather than the first cold solves.
+set.seed(1)
+Xw <- matrix(rnorm(600 * 60), 600, 60)
+yw <- rnorm(600)
+for (k in seq_len(10L)) {
+  rcupp::lasso_fista(Xw, yw, lambda = 0.1, tol = 1e-6)
+}
+
 std_data <- function(X, y) {
   Xc <- X - matrix(colMeans(X), nrow(X), ncol(X), byrow = TRUE)
   xs <- sqrt(colMeans(Xc^2))
@@ -237,8 +284,9 @@ knitr::kable(do.call(rbind, oracle_rows),
 ## Enabling the live benchmark
 
 Both live chunks run only when `glmnet` is installed and
-`rcupp::cuda_available()` is `TRUE`. CI runners have no CUDA Toolkit, so
-`rcupp` builds its CPU reference shim there and the chunks are skipped; the
-reference tables above are static snapshots from a GPU machine. See the CUDA
-build notes in the `gpu-lasso-comparison` vignette for how to link the GPU
-backend.
+`rcupp::cuda_available()` is `TRUE`. The GPU chunk warms the device
+first, so timings reflect steady state (see "Reading the timings honestly").
+CI runners have no CUDA Toolkit, so `rcupp` builds its CPU reference shim
+there and the chunks are skipped; the reference tables and the speedup figure
+above are static snapshots from a GPU machine. See the CUDA build notes in
+the `gpu-lasso-comparison` vignette for how to link the GPU backend.
