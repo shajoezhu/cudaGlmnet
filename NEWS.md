@@ -1,3 +1,7 @@
+# cudaGlmnet 0.0.0.9009
+
+* Development version bumped from 0.0.0.9008.
+
 # cudaGlmnet 0.0.0.9008
 
 * Add a `ridge-benchmark` vignette measuring whole lambda-path fits against
