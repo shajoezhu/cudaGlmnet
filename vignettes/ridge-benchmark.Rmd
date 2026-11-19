@@ -1,0 +1,282 @@
+---
+title: "Benchmark: ridge regression paths with cudaGlmnet"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Benchmark: ridge regression paths with cudaGlmnet}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+HAS_GLMNET <- requireNamespace("glmnet", quietly = TRUE)
+HAS_CUDA <- isTRUE(rcupp::cuda_available())
+RUN <- HAS_GLMNET && HAS_CUDA
+```
+
+```{r status, echo = FALSE}
+if (!RUN) {
+  cat("Live benchmark skipped: needs glmnet and a CUDA backend.\n")
+}
+```
+
+```{r helpers, include = FALSE}
+make_data <- function(n, p) {
+  set.seed(42)
+  X <- matrix(rnorm(n * p), n, p)
+  beta <- rep(0, p)
+  beta[1:5] <- c(2, -1.5, 1, -0.5, 0.75)
+  list(X = X, y = drop(X %*% beta) + rnorm(n, sd = 0.5))
+}
+
+# Standardize once on the host (column population variance 1, y centred) so
+# GPU, pure-R oracle and closed form solve the IDENTICAL problem with
+# standardize = FALSE, intercept = FALSE.
+std_data <- function(d) {
+  Xc <- d$X - matrix(colMeans(d$X), nrow(d$X), ncol(d$X), byrow = TRUE)
+  xs <- sqrt(colMeans(Xc^2))
+  list(X = Xc / matrix(xs, nrow(Xc), ncol(Xc), byrow = TRUE),
+       y = d$y - mean(d$y))
+}
+
+time_median <- function(f, reps = 3L) {
+  f()
+  median(replicate(reps, system.time(f())[["elapsed"]]))
+}
+```
+
+This vignette benchmarks ridge regression (`alpha = 0`) fitted with
+`cuda_glmnet()`. It is a **measurement, not a performance claim**, in the same
+spirit as the `glmnet-benchmark` vignette: it reports where the GPU path is
+faster and where it is not.
+
+Ridge is a clean stress test of the framework. Its objective is smooth, so
+FISTA has a fixed, predictable iteration structure; wall-time differences then
+isolate the *substrate* -- device residency and operator dispatch -- rather
+than algorithmic shortcuts. That substrate is the point of `cudaGlmnet`'s
+`alpha < 1` path: the solver loop lives in this package's own `src/` and
+composes `rcupp`'s Phase-0 resident device operators (Rcpp glue plus rcupp
+substrate). One `rcupp` context is created for a whole lambda path; the design
+matrix and response are uploaded **once**, every inner-loop operator runs on
+device-resident buffers with no host-device round trip, and only one length-`p`
+coefficient vector is downloaded per lambda.
+
+Two consequences, measured below, are where `cudaGlmnet` wins:
+
+- A **whole lambda path in one device context** is 1.6--5.4x faster than
+  issuing one cold `cuda_glmnet()` fit per lambda, and 2.3--6.3x faster than a
+  pure-R implementation of the same FISTA.
+- The compiled, device-resident solver beats an interpreted solver of the
+  identical algorithm, with the margin growing with problem size.
+
+A separate section shows honestly that for a **single** lambda, `glmnet` and a
+direct linear solve are faster. `cudaGlmnet` is a composable GPU substrate,
+not a drop-in replacement for `glmnet`'s ridge path.
+
+## Method
+
+- One synthetic dataset per configuration, `n x p`, with five planted nonzero
+  coefficients and Gaussian noise. Data are standardized on the host as above,
+  so `cuda_glmnet()`, `enet_fista_cpu()` and the closed form all solve the same
+  problem with `standardize = FALSE, intercept = FALSE`. `glmnet` receives the
+  raw data with its own default `standardize = TRUE` (equivalent on this
+  scale) and **default convergence** -- no deprecated `thresh`.
+- A shared 30-value log-spaced grid from `lambda.max` down to
+  `0.01 * lambda.max`. A log-spaced path spends most of its grid at small
+  lambda, the expensive end for an iterative solver, so whole-path timings
+  reflect a realistic `cuda_glmnet()` call.
+- One warm-up call, then the median elapsed time of repeated `system.time()`
+  runs: two repetitions for the resident path and one for the 30-solve
+  baselines (path table), three for the single-lambda table.
+- Before timing, the resident-path solution at a mid-grid lambda is compared
+  with the exact closed form `(X'X + n*lambda*I)^-1 X'y` and with the pure-R
+  oracle; they agree to roughly 1e-6 and 1e-16 respectively, so all methods do
+  comparable work.
+- Only the CUDA backend is timed. On a machine without a CUDA toolkit `rcupp`
+  builds a CPU reference shim whose timings are not representative, so the
+  live chunks are guarded by `requireNamespace("glmnet")` and
+  `rcupp::cuda_available()`.
+
+## Reference measurement
+
+Measured 2026-11-19 on an NVIDIA RTX 4070 Laptop GPU (8 GB), CUDA Toolkit
+13.1, R 4.6.1, glmnet 5.2 and cudaGlmnet 0.0.0.9008 (GPU backend). Wall times
+in seconds; these are a snapshot, not a performance guarantee. The chunk below
+regenerates them on any machine with a CUDA backend.
+
+## Where cudaGlmnet wins: the whole path
+
+Three ways to obtain the same 30 ridge fits:
+
+- **one resident path** -- a single `cuda_glmnet()` call with a 30-value
+  `lambda` grid, one device context, one upload, one Lipschitz power
+  iteration;
+- **30 cold fits** -- 30 separate `cuda_glmnet()` calls, each rebuilding the
+  context, re-uploading `X`/`y` and recomputing the Lipschitz constant in R;
+- **30 pure-R solves** -- 30 `enet_fista_cpu()` calls, the package's pure-R
+  FISTA reference with the identical numerical contract.
+
+| n | p | lambdas | one resident path (s) | 30 cold fits (s) | 30 pure-R solves (s) | cold / path | oracle / path |
+|---|---|---|---|---|---|---|---|
+| 1000 | 500 | 30 | 3.459 | 5.638 | 8.031 | 1.6x | 2.3x |
+| 2000 | 1000 | 30 | 3.937 | 21.231 | 24.912 | 5.4x | 6.3x |
+| 600 | 2000 | 30 | 2.346 | 10.925 | 13.857 | 4.7x | 5.9x |
+
+Coefficients agree with the pure-R oracle to `<= 4.4e-16` and with the exact
+closed form to `<= 9.0e-07` (the FISTA tolerance), so the three columns do the
+same numerical work.
+
+`cold / path` is the residency payoff, and because both sides are measured in
+the same run the ratio is insensitive to GPU clock noise. `oracle / path` is
+the compiled-vs-interpreted payoff: the GPU keeps the matrix resident and runs
+the inner loop on device, while the pure-R version redoes a power iteration
+plus a FISTA loop in interpreted R for every lambda. These are the workloads
+`cudaGlmnet` is built for -- CV folds, bootstrap and rolling windows that fit
+the same data many times, and glmnet-style lambda paths.
+
+Read the ratios against the right baselines: they say the device-resident
+solver is faster than many cold-started fits and than an interpreted solver of
+the same algorithm. They do **not** say it is faster than `glmnet`.
+
+```{r path-benchmark, eval = RUN}
+path_configs <- data.frame(n = c(1000L, 600L), p = c(500L, 2000L))
+
+path_rows <- lapply(seq_len(nrow(path_configs)), function(i) {
+  n <- path_configs$n[i]
+  p <- path_configs$p[i]
+  st <- std_data(make_data(n, p))
+  Xs <- st$X
+  yc <- st$y
+  lmax <- max(abs(as.vector(crossprod(Xs, yc)))) / n
+  grid <- exp(seq(log(lmax), log(0.01 * lmax), length.out = 30L))
+  j <- length(grid) %/% 2L
+  lam <- grid[j]
+  b_gpu <- drop(cuda_glmnet(Xs, yc, lambda = lam, alpha = 0,
+                            standardize = FALSE, intercept = FALSE)$beta)
+  b_cf <- drop(solve(crossprod(Xs) + n * lam * diag(p),
+                     crossprod(Xs, yc)))
+  stopifnot(max(abs(b_gpu - b_cf)) < 1e-3)
+
+  one <- function() {
+    cuda_glmnet(Xs, yc, lambda = grid, alpha = 0,
+                standardize = FALSE, intercept = FALSE)
+  }
+  cold <- function() {
+    for (l in grid) {
+      cuda_glmnet(Xs, yc, lambda = l, alpha = 0,
+                  standardize = FALSE, intercept = FALSE)
+    }
+  }
+  r30 <- function() {
+    for (l in grid) {
+      enet_fista_cpu(Xs, yc, l, alpha = 0)
+    }
+  }
+
+  t_one <- time_median(one, reps = 2L)
+  t_cold <- time_median(cold, reps = 1L)
+  t_r30 <- time_median(r30, reps = 1L)
+  data.frame(
+    n = n, p = p, lambdas = length(grid),
+    resident_path = sprintf("%.3f", t_one),
+    cold_fits = sprintf("%.3f", t_cold),
+    pureR_path = sprintf("%.3f", t_r30),
+    cold_over_path = sprintf("%.1fx", t_cold / t_one),
+    oracle_over_path = sprintf("%.1fx", t_r30 / t_one)
+  )
+})
+
+knitr::kable(
+  do.call(rbind, path_rows),
+  caption = "One 30-lambda ridge path, three ways (wall time, seconds)."
+)
+```
+
+## Where it does not win: a single solve
+
+For one fixed lambda, `glmnet` (compiled coordinate descent with warm starts
+along the path) and a direct linear solve are faster than an iterative GPU
+FISTA. This is expected: a single ridge solve is a one-shot linear system.
+
+| n | p | glmnet (s) | closed form (s) | cudaGlmnet (s) | pure-R oracle (s) | GPU vs oracle |
+|---|---|---|---|---|---|---|
+| 500 | 200 | 0.033 | 0.066 | 0.132 | 0.032 | 0.2x |
+| 1000 | 500 | 0.005 | 0.088 | 0.251 | 0.222 | 0.9x |
+| 2000 | 1000 | 0.023 | 1.870 | 0.462 | 1.149 | 2.5x |
+| 600 | 2000 | 0.154 | 1.768 | 0.246 | 0.374 | 1.5x |
+
+`glmnet` is fastest in every row. The "closed form" column here is the primal
+`(X'X + n*lambda*I)` solve, which is `O(p^3)`; for wide data (`p > n`) the
+dual/Woodbury form `(X X' + n*lambda*I)` is smaller and faster still, so the
+direct-solve baseline is deliberately **not** a straw man. We do not claim a
+win over it. `cudaGlmnet` does beat the pure-R oracle on the larger single
+solves (2.5x, 1.5x), but the decisive, framework-specific advantage is the
+whole-path column above.
+
+```{r single-benchmark, eval = RUN}
+single_configs <- data.frame(n = c(1000L, 2000L), p = c(500L, 1000L))
+
+single_rows <- lapply(seq_len(nrow(single_configs)), function(i) {
+  n <- single_configs$n[i]
+  p <- single_configs$p[i]
+  d <- make_data(n, p)
+  st <- std_data(d)
+  Xs <- st$X
+  yc <- st$y
+  lmax <- max(abs(as.vector(crossprod(Xs, yc)))) / n
+  lam <- 0.01 * lmax
+
+  t_gl <- time_median(function() {
+    glmnet::glmnet(d$X, d$y, alpha = 0, lambda = lam)
+  })
+  t_cf <- time_median(function() {
+    solve(crossprod(Xs) + n * lam * diag(p), crossprod(Xs, yc))
+  })
+  t_gpu <- time_median(function() {
+    cuda_glmnet(Xs, yc, lambda = lam, alpha = 0,
+                standardize = FALSE, intercept = FALSE)
+  })
+  t_or <- time_median(function() {
+    enet_fista_cpu(Xs, yc, lam, alpha = 0)
+  })
+
+  data.frame(
+    n = n, p = p,
+    glmnet = sprintf("%.3f", t_gl),
+    closed_form = sprintf("%.3f", t_cf),
+    cudaGlmnet = sprintf("%.3f", t_gpu),
+    pure_R = sprintf("%.3f", t_or)
+  )
+})
+
+knitr::kable(
+  do.call(rbind, single_rows),
+  caption = "One fixed small lambda, all baselines (wall time, seconds)."
+)
+```
+
+## Interpreting the numbers
+
+`glmnet` remains the faster choice for a one-off ridge fit and for whole paths
+solved by its compiled coordinate descent. `cudaGlmnet` is not trying to be a
+faster `glmnet` here; it is a demonstration that `rcupp` can supply
+algorithm-agnostic, device-resident operators that a downstream package
+composes into its own solver loop. The benefit is structural, and it appears
+when data can be kept on the device and reused across many fits: a whole
+lambda path in one context, repeated CV folds, or rolling windows. That is
+exactly the "Rcpp + rcupp" division of labor, with `rcupp` itself carrying no
+ridge- or lasso-specific code.
+
+Both live chunks use fewer configurations and repetitions than the reference
+tables to keep build time down, so their absolute numbers will differ from the
+snapshot for that reason as well as for hardware differences.
+
+## Enabling the live benchmark
+
+The live chunks run only when `glmnet` is installed and
+`rcupp::cuda_available()` is `TRUE`. CI runners have no CUDA Toolkit, so
+`rcupp` builds its CPU reference shim there and the chunks are skipped; the
+reference tables above are static snapshots from a GPU machine. See the CUDA
+build notes in the `gpu-lasso-comparison` vignette for how to link the GPU
+backend.

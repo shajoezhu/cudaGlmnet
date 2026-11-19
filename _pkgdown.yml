@@ -30,7 +30,10 @@ articles:
   contents:
   - getting-started
   - glmnet-comparison
+- title: Benchmarks
+  contents:
   - glmnet-benchmark
+  - ridge-benchmark
 - title: Background
   contents:
   - gpu-lasso-comparison

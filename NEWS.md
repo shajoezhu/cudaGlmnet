@@ -1,5 +1,7 @@
 # cudaGlmnet 0.0.0.9008
 
+* Add a `ridge-benchmark` vignette measuring whole lambda-path fits against
+  cold fits, a pure-R oracle, `glmnet` and a direct closed-form solve.
 * Development version bumped from 0.0.0.9007.
 
 # cudaGlmnet 0.0.0.9007
