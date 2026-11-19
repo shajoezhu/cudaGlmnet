@@ -1,4 +1,4 @@
-destination: ../docs/cudaGlmnet
+destination: docs
 
 template:
   bootstrap: 5
@@ -12,6 +12,7 @@ reference:
   contents:
   - cuda_lasso
   - lasso_fista_cpu
+  - enet_fista_cpu
 - title: Methods
   contents:
   - coef.cuda_glmnet

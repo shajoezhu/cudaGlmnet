@@ -4,22 +4,24 @@
 
 [![Check](https://github.com/shajoezhu/cudaGlmnet/actions/workflows/check.yaml/badge.svg)](https://github.com/shajoezhu/cudaGlmnet/actions/workflows/check.yaml)
 
-A minimal **glmnet-like front end for the Gaussian lasso**, solved by GPU FISTA
-through the low-level [rcupp](https://github.com/shajoezhu/rcupp) package. It
-adds a lambda path, cross-validation, standardization and an intercept, with
-glmnet-style `coef(s=)` / `predict(s=)` methods — while keeping the compiled
-FISTA solver as the single numerical engine.
+A minimal **glmnet-like front end for the Gaussian lasso and elastic net**,
+solved by GPU FISTA through the low-level
+[rcupp](https://github.com/shajoezhu/rcupp) package. It adds a lambda path,
+cross-validation, standardization and an intercept, with glmnet-style
+`coef(s=)` / `predict(s=)` methods. The `alpha` argument selects lasso
+(`alpha = 1`, the default), ridge (`alpha = 0`) or the elastic net in between.
 
 If you want the raw operators/sessions instead of a glmnet-style API, use
 `rcupp` directly.
 
 ## What it provides
 
-- `cuda_glmnet()` — a full **lambda path** (`lambda_max = max|X^T y|/n` down to
-  `lambda.min.ratio`), standardization (population scale `1/n`), an intercept
-  (via centering), coefficients mapped back to the original scale, and glmnet
-  style `s` selection by numeric `lambda` or log-lambda interpolation. `warm_start`
-  is opt-in (default off, keeping cold-start fits bit-identical to one-shot).
+- `cuda_glmnet()` — a full **lambda path** (`lambda_max = max|X^T y|/n`,
+  divided by `alpha` for the elastic net), standardization (population scale
+  `1/n`), an intercept (via centering), coefficients mapped back to the
+  original scale, and glmnet style `s` selection by numeric `lambda` or
+  log-lambda interpolation. `warm_start` is opt-in (default off, keeping
+  cold-start fits bit-identical to one-shot).
 - `cv.cuda_glmnet()` — K-fold CV with `lambda.min` / `lambda.1se`, custom
   `foldid` and user-supplied `lambda` grids.
 - glmnet-style S3 methods — `coef()` / `predict()` / `print()` for
@@ -28,10 +30,16 @@ If you want the raw operators/sessions instead of a glmnet-style API, use
   unchanged as the **numerical reference** (no intercept / standardization).
 - `lasso_fista_cpu()` — a pure-R FISTA oracle with the identical numerical
   contract, used to verify the compiled path.
+- `enet_fista_cpu()` — the pure-R elastic-net / ridge oracle for `alpha < 1`.
 
-A whole lambda path (and each CV fold) runs through **one `rcupp` session**:
-`X`/`y` are uploaded to the device once and the cached Lipschitz constant is
-reused across every lambda, which is what makes repeated-fit workloads fast.
+For `alpha = 1` a whole lambda path (and each CV fold) runs through **one
+`rcupp` lasso session**: `X`/`y` are uploaded to the device once and the
+cached Lipschitz constant is reused across every lambda. For `alpha < 1` the
+elastic-net loop lives in this package's own `src/` (Rcpp glue plus rcupp
+substrate) and composes rcupp's **resident device operators**, so data stays
+on the device across the whole solver loop. In both cases repeated-fit
+workloads avoid a host-device round trip per operator, and rcupp itself stays
+algorithm-agnostic.
 
 ## Installation
 
@@ -57,10 +65,14 @@ set.seed(1)
 X <- matrix(rnorm(60 * 5), 60, 5)
 y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(60, sd = 0.5)
 
-# Full lambda path
+# Full lambda path (lasso)
 fit <- cuda_glmnet(X, y, nlambda = 10)
 coef(fit, s = fit$lambda[5])                # coefficients at one lambda
 predict(fit, X[1:3, ], s = fit$lambda[5])   # predictions at one lambda
+
+# Elastic net / ridge (alpha = 1 is the lasso, alpha = 0 is pure ridge)
+en <- cuda_glmnet(X, y, alpha = 0.5, nlambda = 10)
+coef(en, s = en$lambda[5])
 
 # Cross-validation
 cv <- cv.cuda_glmnet(X, y, nlambda = 8, nfolds = 3)
@@ -74,8 +86,11 @@ max(abs(coef(ref) - lasso_fista_cpu(X, y, 0.05)$coefficients))  # ~0
 
 ## Scope and numerical notes
 
-- Gaussian family, dense `x`, GPU FISTA. Not yet: elastic net (`alpha`),
-  binomial, sparse `x`.
+- Gaussian family, dense `x`, GPU FISTA. Elastic net (`alpha`) is supported;
+  `alpha = 1` keeps the lasso path bit-identical to earlier versions, while
+  `alpha < 1` is composed downstream from rcupp resident device operators
+  (rcupp itself stays algorithm-agnostic). Not yet: binomial, sparse `x`,
+  closed-form / SVD ridge paths.
 - FISTA and glmnet's coordinate descent solve the **same objective** but use
   different algorithms and convergence criteria: the drop-in promises agreement
   within tolerance, not bit-for-bit reproduction of glmnet's solution path.
@@ -93,7 +108,7 @@ max(abs(coef(ref) - lasso_fista_cpu(X, y, 0.05)$coefficients))  # ~0
 | Package | Role | Link |
 |---|---|---|
 | rcupp | low-level Rcpp/CUDA bridge + reusable operator/session framework | [github](https://github.com/shajoezhu/rcupp) |
-| **cudaGlmnet** | glmnet-style GPU lasso front end | this repo |
+| **cudaGlmnet** | glmnet-style GPU lasso / elastic-net front end (Rcpp + rcupp) | this repo |
 | cudaBio | PCA / GWAS power iteration (`p >> n`) downstream example | [github](https://github.com/shajoezhu/cudaBio) |
 | cudaFin | rolling-window lasso forecasting downstream example | [github](https://github.com/shajoezhu/cudaFin) |
 

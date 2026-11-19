@@ -71,8 +71,12 @@ NULL
   list(Xs = Xs, ys = yc, xm = xm, xs = xs, ym = ym, n = n, p = p)
 }
 
-.cg_lambda_seq <- function(prep, nlambda, lambda.min.ratio) {
-  lmax <- max(abs(as.vector(crossprod(prep$Xs, prep$ys)))) / prep$n
+.cg_lambda_seq <- function(prep, nlambda, lambda.min.ratio, alpha = 1) {
+  # glmnet-style KKT at beta = 0: |X'y/n| <= lambda * alpha, so the largest
+  # useful penalty is base / alpha. Floor tiny alpha so pure ridge (alpha = 0)
+  # does not blow the path up; alpha = 1 leaves the original grid unchanged.
+  a <- max(alpha, 1e-3)
+  lmax <- max(abs(as.vector(crossprod(prep$Xs, prep$ys)))) / prep$n / a
   if (!is.finite(lmax) || lmax <= 0) {
     stop("cannot build a lambda path: all cross-product X'y are zero",
          call. = FALSE)
@@ -100,14 +104,15 @@ NULL
        objective = res$objective, backend = res$backend)
 }
 
-.cg_resolve_lambda <- function(prep, lambda, nlambda, lambda.min.ratio) {
+.cg_resolve_lambda <- function(prep, lambda, nlambda, lambda.min.ratio,
+                               alpha = 1) {
   if (is.null(lambda)) {
     ratio <- if (is.null(lambda.min.ratio)) {
       if (prep$n < prep$p) 0.01 else 1e-4
     } else {
       lambda.min.ratio
     }
-    return(.cg_lambda_seq(prep, nlambda, ratio))
+    return(.cg_lambda_seq(prep, nlambda, ratio, alpha))
   }
   if (!is.numeric(lambda) || length(lambda) < 1L || anyNA(lambda) ||
         any(lambda < 0)) {
@@ -132,22 +137,27 @@ NULL
 #' \code{glmnet::glmnet()} for the Gaussian family.
 #'
 #' @section Numerical notes:
-#' The objective is \code{1/(2n)||y - a0 - X beta||^2 + lambda||beta||_1}.
-#' Standardisation uses the population (\code{1/n}) scale. The path is fitted
-#' through a single \pkg{rcupp} session so the (standardised) design matrix
-#' stays resident across every lambda. By default (\code{warm_start = FALSE})
-#' each lambda is \bold{cold-started} and is bit-identical to a one-shot
-#' \code{rcupp::lasso_fista()} solve; set \code{warm_start = TRUE} to seed each
-#' fit from the previous solution (fewer iterations, same optimum, not
-#' bit-identical). FISTA and the coordinate descent of glmnet solve the same
-#' objective but need not agree bit-for-bit.
+#' The objective is \code{1/(2n)||y - a0 - X beta||^2 + lambda P(beta)}, where
+#' the penalty is \code{(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1}. Set
+#' \code{alpha = 1} for the lasso, \code{alpha = 0} for pure ridge, or a value
+#' in between for the elastic net. Standardisation uses the population
+#' (\code{1/n}) scale. For \code{alpha = 1} the path is fitted through a single
+#' \pkg{rcupp} lasso session (cold starts, \code{warm_start = FALSE}, stay
+#' bit-identical to a one-shot \code{rcupp::lasso_fista()} solve). For
+#' \code{alpha < 1} it is fitted by a downstream \code{Rcpp} + \pkg{rcupp}
+#' loop over resident device operators, with the design uploaded once. In
+#' both cases \code{warm_start = TRUE} seeds each fit from the previous
+#' solution (fewer iterations, same optimum, not bit-identical). FISTA and
+#' the coordinate descent of glmnet solve the same objective but need not
+#' agree bit-for-bit.
 #'
 #' @param x Numeric \code{n x p} design matrix (no missing values).
 #' @param y Numeric response of length \code{n}.
 #' @param lambda Optional numeric vector of penalties (sorted decreasing
 #'   internally). If \code{NULL} (default), a log-spaced path of length
 #'   \code{nlambda} is generated from \code{max(abs(crossprod(X, y)))/n} down to
-#'   \code{lambda.max * lambda.min.ratio}.
+#'   \code{lambda.max * lambda.min.ratio}. For \code{alpha < 1} the largest
+#'   penalty is divided by \code{alpha} (glmnet-style KKT at \code{beta = 0}).
 #' @param nlambda Number of lambda values when \code{lambda = NULL}.
 #' @param lambda.min.ratio Smallest lambda as a fraction of the largest.
 #'   Defaults to \code{0.01} when \code{n < p}, else \code{1e-4}
@@ -156,6 +166,9 @@ NULL
 #'   \code{TRUE}).
 #' @param intercept Fit an unpenalised intercept by centering (default
 #'   \code{TRUE}).
+#' @param alpha Elastic-net mixing in \code{[0, 1]}; \code{1} (default) is the
+#'   lasso, \code{0} is pure ridge. The default keeps the lasso path
+#'   bit-identical to earlier versions.
 #' @param max_iter Maximum FISTA iterations per lambda.
 #' @param tol Relative convergence tolerance.
 #' @param warm_start Logical; seed each lambda fit from the previous solution
@@ -181,11 +194,12 @@ NULL
 #' @export
 cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
                         lambda.min.ratio = NULL, standardize = TRUE,
-                        intercept = TRUE, max_iter = 1000L, tol = 1e-6,
-                        warm_start = FALSE, ...) {
+                        intercept = TRUE, alpha = 1, max_iter = 1000L,
+                        tol = 1e-6, warm_start = FALSE, ...) {
   y <- .cg_check_xy(x, y)
   .cg_check_scalars(max_iter, tol, nlambda, lambda.min.ratio)
   .cg_check_flags(standardize, intercept)
+  .cg_check_alpha(alpha)
   if (!is.logical(warm_start) || length(warm_start) != 1L ||
         is.na(warm_start)) {
     stop("'warm_start' must be TRUE or FALSE", call. = FALSE)
@@ -193,19 +207,28 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
   if (storage.mode(x) != "double") storage.mode(x) <- "double"
 
   prep <- .cg_prep(x, y, standardize, intercept)
-  lambda <- .cg_resolve_lambda(prep, lambda, nlambda, lambda.min.ratio)
+  lambda <- .cg_resolve_lambda(prep, lambda, nlambda, lambda.min.ratio,
+                               alpha)
   L <- length(lambda)
 
-  # One session for the whole path: prep$Xs / prep$ys are fixed across all
-  # lambda values, so they are uploaded to the device exactly once. Cold-start
-  # fits (warm_start = FALSE) stay bit-identical to the one-shot reference.
-  s <- rcupp::lasso_session()
-  rcupp::session_set_data(s, prep$Xs, prep$ys)
-  on.exit(rcupp::session_destroy(s), add = TRUE)
-
-  fits <- lapply(lambda, function(l) {
-    .cg_fit_one(prep, l, max_iter, tol, session = s, warm_start = warm_start)
-  })
+  if (alpha == 1) {
+    # One lasso session for the whole path: prep$Xs / prep$ys are fixed across
+    # all lambda values, so they are uploaded to the device exactly once.
+    # Cold-start fits (warm_start = FALSE) stay bit-identical to the one-shot
+    # reference. This branch is the original lasso path, kept unchanged.
+    s <- rcupp::lasso_session()
+    rcupp::session_set_data(s, prep$Xs, prep$ys)
+    on.exit(rcupp::session_destroy(s), add = TRUE)
+    fits <- lapply(lambda, function(l) {
+      .cg_fit_one(prep, l, max_iter, tol,
+                  session = s, warm_start = warm_start)
+    })
+  } else {
+    # Elastic net / ridge: a downstream Rcpp + rcupp loop over resident
+    # device operators. The rcupp lasso session is lasso-only, so the
+    # algorithm lives here, composed from algorithm-agnostic parts.
+    fits <- .cg_enet_fits(prep, lambda, alpha, max_iter, tol, warm_start)
+  }
   # matrix() keeps beta a p x L matrix even when p == 1 (vapply would collapse).
   beta <- matrix(unlist(lapply(fits, `[[`, "beta"), use.names = FALSE),
                  nrow = prep$p, ncol = L)
@@ -262,6 +285,8 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
 #'   drawn (use \code{set.seed()} for reproducibility).
 #' @param nlambda,lambda.min.ratio Path controls when \code{lambda = NULL}.
 #' @param standardize,intercept Passed to [cuda_glmnet()].
+#' @param alpha Elastic-net mixing in \code{[0, 1]}; see [cuda_glmnet()].
+#'   Default \code{1} (lasso).
 #' @param max_iter,tol Solver controls.
 #' @param warm_start Logical; passed to [cuda_glmnet()] and to each fold fit.
 #'   Default \code{FALSE} (cold start).
@@ -285,12 +310,13 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
 #' @export
 cv.cuda_glmnet <- function(x, y, lambda = NULL, nfolds = 10L, foldid = NULL,
                            nlambda = 100L, lambda.min.ratio = NULL,
-                           standardize = TRUE, intercept = TRUE,
+                           standardize = TRUE, intercept = TRUE, alpha = 1,
                            max_iter = 1000L, tol = 1e-6,
                            warm_start = FALSE, ...) {
   y <- .cg_check_xy(x, y)
   .cg_check_scalars(max_iter, tol, nlambda, lambda.min.ratio)
   .cg_check_flags(standardize, intercept)
+  .cg_check_alpha(alpha)
   if (!is.logical(warm_start) || length(warm_start) != 1L ||
         is.na(warm_start)) {
     stop("'warm_start' must be TRUE or FALSE", call. = FALSE)
@@ -319,28 +345,38 @@ cv.cuda_glmnet <- function(x, y, lambda = NULL, nfolds = 10L, foldid = NULL,
   }
 
   prep_full <- .cg_prep(x, y, standardize, intercept)
-  lambda <- .cg_resolve_lambda(prep_full, lambda, nlambda, lambda.min.ratio)
+  lambda <- .cg_resolve_lambda(prep_full, lambda, nlambda,
+                               lambda.min.ratio, alpha)
   L <- length(lambda)
 
   fit <- cuda_glmnet(x, y, lambda = lambda, nlambda = nlambda,
                      standardize = standardize, intercept = intercept,
-                     max_iter = max_iter, tol = tol, warm_start = warm_start)
+                     alpha = alpha, max_iter = max_iter, tol = tol,
+                     warm_start = warm_start)
 
   pred <- matrix(NA_real_, n, L)
   for (k in seq_len(nfolds)) {
     te <- which(foldid == k)
     tr <- setdiff(seq_len(n), te)
     pk <- .cg_prep(x[tr, , drop = FALSE], y[tr], standardize, intercept)
-    # One session per fold covers that fold's whole lambda path; each fold's
-    # training design is fixed across its L fits, so upload once and reuse.
-    sk <- rcupp::lasso_session()
-    rcupp::session_set_data(sk, pk$Xs, pk$ys)
-    for (j in seq_len(L)) {
-      f <- .cg_fit_one(pk, lambda[j], max_iter, tol,
-                       session = sk, warm_start = warm_start)
-      pred[te, j] <- f$a0 + drop(x[te, , drop = FALSE] %*% f$beta)
+    if (alpha == 1) {
+      # One session per fold covers that fold's whole lambda path; each fold's
+      # training design is fixed across its L fits, so upload once and reuse.
+      sk <- rcupp::lasso_session()
+      rcupp::session_set_data(sk, pk$Xs, pk$ys)
+      for (j in seq_len(L)) {
+        f <- .cg_fit_one(pk, lambda[j], max_iter, tol,
+                         session = sk, warm_start = warm_start)
+        pred[te, j] <- f$a0 + drop(x[te, , drop = FALSE] %*% f$beta)
+      }
+      rcupp::session_destroy(sk)
+    } else {
+      fk <- .cg_enet_fits(pk, lambda, alpha, max_iter, tol, warm_start)
+      for (j in seq_len(L)) {
+        f <- fk[[j]]
+        pred[te, j] <- f$a0 + drop(x[te, , drop = FALSE] %*% f$beta)
+      }
     }
-    rcupp::session_destroy(sk)
   }
 
   err <- (pred - y)^2

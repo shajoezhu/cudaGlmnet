@@ -20,12 +20,16 @@ glmnet
 glmnet's
 gputools
 installable
+KKT
 Lipschitz
+md
 nvcc
 nvrtc
 NVRTC
+prox
 Rcpp
 rcupp
+rcupp's
 roadmap
 rpath
 RTX

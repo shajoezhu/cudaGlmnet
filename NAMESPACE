@@ -12,9 +12,12 @@ S3method(print,cv.cuda_glmnet)
 export(cuda_glmnet)
 export(cuda_lasso)
 export(cv.cuda_glmnet)
+export(enet_fista_cpu)
 export(lasso_fista_cpu)
+importFrom(Rcpp,evalCpp)
 importFrom(rcupp,lasso_fista)
 importFrom(stats,
   coef,
   predict
 )
+useDynLib(cudaGlmnet, .registration = TRUE)

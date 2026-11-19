@@ -14,6 +14,7 @@ cv.cuda_glmnet(
   lambda.min.ratio = NULL,
   standardize = TRUE,
   intercept = TRUE,
+  alpha = 1,
   max_iter = 1000L,
   tol = 1e-06,
   warm_start = FALSE,
@@ -38,6 +39,9 @@ drawn (use \code{set.seed()} for reproducibility).}
 \item{nlambda, lambda.min.ratio}{Path controls when \code{lambda = NULL}.}
 
 \item{standardize, intercept}{Passed to \code{\link[=cuda_glmnet]{cuda_glmnet()}}.}
+
+\item{alpha}{Elastic-net mixing in \code{[0, 1]}; see \code{\link[=cuda_glmnet]{cuda_glmnet()}}.
+Default \code{1} (lasso).}
 
 \item{max_iter, tol}{Solver controls.}
 

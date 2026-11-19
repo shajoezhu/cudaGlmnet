@@ -12,6 +12,7 @@ cuda_glmnet(
   lambda.min.ratio = NULL,
   standardize = TRUE,
   intercept = TRUE,
+  alpha = 1,
   max_iter = 1000L,
   tol = 1e-06,
   warm_start = FALSE,
@@ -26,7 +27,8 @@ cuda_glmnet(
 \item{lambda}{Optional numeric vector of penalties (sorted decreasing
 internally). If \code{NULL} (default), a log-spaced path of length
 \code{nlambda} is generated from \code{max(abs(crossprod(X, y)))/n} down to
-\code{lambda.max * lambda.min.ratio}.}
+\code{lambda.max * lambda.min.ratio}. For \code{alpha < 1} the largest
+penalty is divided by \code{alpha} (glmnet-style KKT at \code{beta = 0}).}
 
 \item{nlambda}{Number of lambda values when \code{lambda = NULL}.}
 
@@ -39,6 +41,10 @@ Defaults to \code{0.01} when \code{n < p}, else \code{1e-4}
 
 \item{intercept}{Fit an unpenalised intercept by centering (default
 \code{TRUE}).}
+
+\item{alpha}{Elastic-net mixing in \code{[0, 1]}; \code{1} (default) is the
+lasso, \code{0} is pure ridge. The default keeps the lasso path
+bit-identical to earlier versions.}
 
 \item{max_iter}{Maximum FISTA iterations per lambda.}
 
@@ -74,15 +80,19 @@ back to the original scale, so results are directly comparable to
 }
 \section{Numerical notes}{
 
-The objective is \code{1/(2n)||y - a0 - X beta||^2 + lambda||beta||_1}.
-Standardisation uses the population (\code{1/n}) scale. The path is fitted
-through a single \pkg{rcupp} session so the (standardised) design matrix
-stays resident across every lambda. By default (\code{warm_start = FALSE})
-each lambda is \bold{cold-started} and is bit-identical to a one-shot
-\code{rcupp::lasso_fista()} solve; set \code{warm_start = TRUE} to seed each
-fit from the previous solution (fewer iterations, same optimum, not
-bit-identical). FISTA and the coordinate descent of glmnet solve the same
-objective but need not agree bit-for-bit.
+The objective is \code{1/(2n)||y - a0 - X beta||^2 + lambda P(beta)}, where
+the penalty is \code{(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1}. Set
+\code{alpha = 1} for the lasso, \code{alpha = 0} for pure ridge, or a value
+in between for the elastic net. Standardisation uses the population
+(\code{1/n}) scale. For \code{alpha = 1} the path is fitted through a single
+\pkg{rcupp} lasso session (cold starts, \code{warm_start = FALSE}, stay
+bit-identical to a one-shot \code{rcupp::lasso_fista()} solve). For
+\code{alpha < 1} it is fitted by a downstream \code{Rcpp} + \pkg{rcupp}
+loop over resident device operators, with the design uploaded once. In
+both cases \code{warm_start = TRUE} seeds each fit from the previous
+solution (fewer iterations, same optimum, not bit-identical). FISTA and
+the coordinate descent of glmnet solve the same objective but need not
+agree bit-for-bit.
 }
 
 \examples{

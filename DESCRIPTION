@@ -5,16 +5,20 @@ Version: 0.0.0.9007
 Authors@R: person("Joe", "Zhu", email = "sha.joe.zhu@gmail.com", role = c("aut", "cre"))
 Author: Joe Zhu [aut, cre]
 Maintainer: Joe Zhu <sha.joe.zhu@gmail.com>
-Description: A glmnet-like interface for the Gaussian lasso solved by GPU
-    FISTA through the low-level 'rcupp' package. Provides lambda paths,
-    cross-validation, standardization and an intercept, with coef/predict
-    methods using glmnet-style 's' selection. The single fixed-lambda
-    cuda_lasso() entry point is retained as the numerical reference path.
-    Sparse x, other families and elastic-net mixing are future work.
+Description: A glmnet-like interface for the Gaussian lasso and elastic net
+    solved by GPU FISTA through the low-level 'rcupp' package. Provides lambda
+    paths, cross-validation, standardization and an intercept, with
+    coef/predict methods using glmnet-style 's' selection. Elastic-net
+    mixing is composed downstream (Rcpp glue plus rcupp substrate) from
+    rcupp's resident device operators; rcupp itself stays algorithm-agnostic.
+    The single fixed-lambda cuda_lasso() entry point is retained as the
+    numerical reference path. Sparse x and other families are future work.
 License: Apache License 2.0
 Encoding: UTF-8
 Language: en-US
-Imports: rcupp (>= 0.1.0), stats
+Imports: rcupp (>= 0.1.0), stats, Rcpp
+LinkingTo: rcupp, Rcpp
+NeedsCompilation: yes
 Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml, glmnet
 Remotes: shajoezhu/rcupp
 VignetteBuilder: knitr
