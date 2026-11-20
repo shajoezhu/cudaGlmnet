@@ -5,7 +5,7 @@ enet_path_cpp <- function(Xs, ys, lambda, alpha, L, warm_start, max_iter, tol) {
     .Call(`_cudaGlmnet_enet_path_cpp`, Xs, ys, lambda, alpha, L, warm_start, max_iter, tol)
 }
 
-resident_subsets_cpp <- function(x, y, idx_list, lambda, strategy) {
-    .Call(`_cudaGlmnet_resident_subsets_cpp`, x, y, idx_list, lambda, strategy)
+resident_subsets_cpp <- function(x, y, idx_list, lambda, strategy, method) {
+    .Call(`_cudaGlmnet_resident_subsets_cpp`, x, y, idx_list, lambda, strategy, method)
 }
 

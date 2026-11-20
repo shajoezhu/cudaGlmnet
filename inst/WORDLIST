@@ -29,6 +29,7 @@ md
 nvcc
 nvrtc
 NVRTC
+omic
 prox
 Rcpp
 rcupp

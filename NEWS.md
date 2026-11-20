@@ -1,5 +1,14 @@
 # cudaGlmnet 0.0.0.9013
 
+* Add a dual / Woodbury route to `cuda_resident_subsets()` via a new `method`
+  argument (`"auto"` / `"primal"` / `"dual"`). For `p > m` (the production
+  `p >> n` shape) the auto/dual route solves the smaller `m x m` system
+  `beta = Xs' (Xs Xs' + m*lambda*I)^{-1} ys` using the C-stage `rcupp_d_gemm`
+  part plus `potrf` / `potrs`, instead of materializing a `p x p` Gram. Both
+  routes agree with the exact closed form to machine precision; `sys_dim` and
+  the resolved `method` are returned. Strategy (`resident` / `cold`) stays
+  orthogonal to method. `rcupp` itself remains algorithm-agnostic.
+
 * Development version bumped from 0.0.0.9012.
 
 # cudaGlmnet 0.0.0.9012

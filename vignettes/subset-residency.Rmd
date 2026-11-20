@@ -187,16 +187,73 @@ knitr::kable(
 )
 ```
 
+## Dual / Woodbury route for `p >> m`
+
+The `p x p` primal Gram above is demo-scale. For production `p >> n` data
+(e.g. a genotype panel with far more markers than samples) one solves the
+algebraically equivalent **dual** system instead, via the push-through
+(Woodbury) identity
+`(Xs'Xs + t I)^{-1} Xs' = Xs' (Xs Xs' + t I)^{-1}` with `t = m*lambda`:
+`beta = Xs' (Xs Xs' + m*lambda*I)^{-1} ys`. This builds a `m x m` system
+instead of `p x p`. `cuda_resident_subsets(..., method = "dual")` composes the
+C-stage `rcupp_d_gemm` part (forming `Xs Xs'`) with the B-stage `potrf` /
+`potrs` parts and a final `gemv_t`; `method = "auto"` (the default) picks the
+smaller system automatically -- dual when `p > m`, primal otherwise. Strategy
+and method are orthogonal: `resident` / `cold` still control only data
+movement.
+
+The system dimension is the whole point, and it is deterministic (no timing
+claim): for `n = 200`, `p = 4000`, `m = 150`, the primal Cholesky is `4000 x
+4000` (16 million doubles ~ 128 MB) while the dual is `150 x 150` (22.5
+thousand doubles ~ 0.18 MB) -- roughly 700x less memory, and a much cheaper
+factorization.
+
+| panel | p | m | primal Gram | dual Gram | ratio |
+|---|---|---|---|---|---|
+| demo | 80 | 6000 | 80 x 80 | 6000 x 6000 | dual is larger (auto picks primal) |
+| genotype | 4000 | 150 | 4000 x 4000 | 150 x 150 | ~711x smaller (auto picks dual) |
+| multi-omic | 2000 | 200 | 2000 x 2000 | 200 x 200 | 100x smaller (auto picks dual) |
+
+This chunk always runs on either backend and checks that both routes agree
+with each other and the exact closed form:
+
+```{r dual-correctness}
+set.seed(11)
+n <- 100L
+p <- 200L
+m <- 40L
+lambda <- 0.25
+X <- matrix(rnorm(n * p), n, p)
+y <- rnorm(n)
+idx <- replicate(5L, sample.int(n, m), simplify = FALSE)
+exact <- vapply(idx, function(ii) cf_beta(X, y, ii, lambda), numeric(p))
+
+auto <- cuda_resident_subsets(X, y, idx, lambda, "resident", "auto")
+dual <- cuda_resident_subsets(X, y, idx, lambda, "resident", "dual")
+primal <- cuda_resident_subsets(X, y, idx, lambda, "resident", "primal")
+cold <- cuda_resident_subsets(X, y, idx, lambda, "cold", "dual")
+
+stopifnot(auto$method == "dual", auto$sys_dim == m,
+          primal$method == "primal", primal$sys_dim == p)
+stopifnot(all(c(auto$info, dual$info, primal$info, cold$info) == 0L))
+stopifnot(isTRUE(all.equal(dual$beta, primal$beta, tolerance = 1e-7)))
+stopifnot(isTRUE(all.equal(dual$beta, cold$beta, tolerance = 1e-10)))
+max_cf <- max(abs(dual$beta - exact))
+stopifnot(max_cf < 1e-6)
+cat(sprintf("p=%d m=%d | method=%s sys_dim=%d | max|beta-exact|=%.2e\n",
+            p, m, auto$method, auto$sys_dim, max_cf))
+```
+
 ## Interpreting the numbers
 
 This is an empirical demonstration that keeping a matrix resident and
 selecting subsets on the device removes the per-subset re-upload. It is **not**
 a claim that closed-form ridge is faster than `glmnet`, an iterative solver, or
-a dual/Woodbury solve. In fact the `p x p` Gram matrix and Cholesky here are
-demo-scale: for production `p >> n` data one would solve the much smaller dual
-`(X X' + m*lambda*I)` system instead. The `m*lambda*I` diagonal is constant
-across the equal-size subsets, so it is uploaded once; `syrk` fills only the
-lower triangle and `potrf` / `potrs` read that same triangle.
+a tuned dual/Woodbury solve. The `m*lambda*I` diagonal is constant across the
+equal-size subsets, so it is uploaded once; `syrk` fills only the lower
+triangle and `potrf` / `potrs` read that same triangle. The `method = "dual"`
+route above removes the `p x p` materialization for `p >> m`, but this function
+is still a reference composition, not a production tuned solver.
 
 Read the ratio against the right baseline. Both strategies share one context
 and one identical solve per subset; the resident strategy's advantage is
@@ -216,5 +273,6 @@ chunk runs only when `rcupp::cuda_available()` is `TRUE`. CI runners have no
 CUDA Toolkit, so `rcupp` builds its CPU reference shim there and the timing
 chunk is skipped; the reference table and plot above are static snapshots from
 a GPU machine. Note that the CPU shim still needs an `rcupp` built with the
-B-stage parts (`gather_rows` / `syrk` / `potrf` / `potrs`); see the CUDA build
+B-stage parts (`gather_rows` / `syrk` / `potrf` / `potrs`); the `method =
+"dual"` route additionally needs the C-stage `gemm` part. See the CUDA build
 notes in the `gpu-lasso-comparison` vignette.
