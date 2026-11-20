@@ -28,9 +28,25 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// resident_subsets_cpp
+Rcpp::List resident_subsets_cpp(Rcpp::NumericMatrix x, Rcpp::NumericVector y, Rcpp::List idx_list, double lambda, std::string strategy);
+RcppExport SEXP _cudaGlmnet_resident_subsets_cpp(SEXP xSEXP, SEXP ySEXP, SEXP idx_listSEXP, SEXP lambdaSEXP, SEXP strategySEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type x(xSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type y(ySEXP);
+    Rcpp::traits::input_parameter< Rcpp::List >::type idx_list(idx_listSEXP);
+    Rcpp::traits::input_parameter< double >::type lambda(lambdaSEXP);
+    Rcpp::traits::input_parameter< std::string >::type strategy(strategySEXP);
+    rcpp_result_gen = Rcpp::wrap(resident_subsets_cpp(x, y, idx_list, lambda, strategy));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_cudaGlmnet_enet_path_cpp", (DL_FUNC) &_cudaGlmnet_enet_path_cpp, 8},
+    {"_cudaGlmnet_resident_subsets_cpp", (DL_FUNC) &_cudaGlmnet_resident_subsets_cpp, 5},
     {NULL, NULL, 0}
 };
 

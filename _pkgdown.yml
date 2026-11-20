@@ -13,6 +13,9 @@ reference:
   - cuda_lasso
   - lasso_fista_cpu
   - enet_fista_cpu
+- title: Device-resident subset refits
+  contents:
+  - cuda_resident_subsets
 - title: Methods
   contents:
   - coef.cuda_glmnet
@@ -34,6 +37,8 @@ articles:
   contents:
   - glmnet-benchmark
   - ridge-benchmark
+  - bio-flagship-benchmark
+  - subset-residency
 - title: Background
   contents:
   - gpu-lasso-comparison

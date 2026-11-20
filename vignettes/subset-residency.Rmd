@@ -1,0 +1,220 @@
+---
+title: "Benchmark: device-resident subset refits with cudaGlmnet"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Benchmark: device-resident subset refits with cudaGlmnet}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+HAS_CUDA <- isTRUE(rcupp::cuda_available())
+RUN <- HAS_CUDA
+```
+
+```{r status, echo = FALSE}
+if (!RUN) {
+  cat("Live timing skipped: needs a CUDA backend.\n")
+}
+```
+
+```{r helpers, include = FALSE}
+make_data <- function(n, p) {
+  set.seed(42)
+  X <- matrix(rnorm(n * p), n, p)
+  list(X = X, y = rnorm(n))
+}
+
+time_median <- function(f, reps = 3L) {
+  f()
+  median(replicate(reps, system.time(f())[["elapsed"]]))
+}
+
+# Exact closed-form ridge for a subset, matching the C++ solver convention
+# (Xs'Xs + m*lambda*I) beta = Xs'ys, with m = length(idx).
+cf_beta <- function(X, y, idx, lambda) {
+  Xs <- X[idx, , drop = FALSE]
+  ys <- y[idx]
+  m <- length(idx)
+  drop(solve(crossprod(Xs) + m * lambda * diag(ncol(Xs)),
+             crossprod(Xs, ys)))
+}
+```
+
+`cuda_resident_subsets()` is a **composable, downstream** solver that keeps one
+full panel resident on the device and refits many row subsets through a
+device-side gather, without re-uploading the design matrix per subset. This
+vignette measures exactly that: **data-movement amortization**, not the
+performance of a closed-form ridge solver. It is a measurement, not a
+performance claim, in the same spirit as the `ridge-benchmark` and
+`bio-flagship-benchmark` vignettes.
+
+## Why this matters
+
+The `bio-flagship-benchmark` vignette showed a real but *flat* speedup: one
+30-lambda resident path beats 30 cold fits (roughly 3--6x), but the ratio stays
+flat as the number of candidate panels grows. The reason was stated there
+honestly: `cuda_glmnet()` is a pure-R API and each call rebuilds its context
+and re-uploads `X`, so refitting a *different* subset of rows still pays a full
+upload every time. The `rcupp` device-context ABI had only whole-buffer
+`buf_upload` / `gemv` / `ger`, with no device-side row indexing.
+
+Stage 2 adds the missing part: `rcupp_d_gather_rows` (plus `syrk`, `potrf`,
+`potrs`) lets one `rcupp_ctx` hold the whole panel once and select each subset
+on the device. `cuda_resident_subsets()` composes those parts downstream
+(Rcpp glue plus rcupp substrate); `rcupp` itself still carries no ridge, CV or
+reference-panel code.
+
+## What is measured
+
+For a full panel `X` (`n x p`) and `B` equal-size row subsets (size `m`), each
+subset solves the same closed-form ridge system
+`(Xs'Xs + m*lambda*I) beta = Xs'ys`. Two strategies are compared:
+
+- **resident** -- uploads the whole `n x p` panel once, then selects each
+  subset with `rcupp_d_gather_rows` (device to device, no host round trip);
+- **cold** -- assembles each `m x p` subset on the host and re-uploads it on
+  every refit, modeling the old per-fit `set_data` cost.
+
+Both strategies share a single `rcupp_ctx` and the same `syrk` -> `potrf` ->
+`potrs` solve, so the only difference is the host-to-device transfer. That is
+why the absolute cold/resident ratio here is smaller than the 3--6x of the
+`bio-flagship-benchmark`: the old cold baseline there paid a fresh context and
+an iterative FISTA each time, whereas here it only re-uploads. `syrk` writes
+only the lower triangle, and `potrf` / `potrs` must use the same `uplo`.
+
+## Correctness (both backends)
+
+This chunk always runs, including on `rcupp`'s CPU reference shim: both
+`rcupp_d_*` backends implement the same four parts. Resident and cold betas are
+identical and match the exact closed form to machine precision.
+
+```{r correctness}
+d <- make_data(60L, 6L)
+X <- d$X
+y <- d$y
+idx_list <- replicate(4L, sample.int(60L, 30L), simplify = FALSE)
+lambda <- 0.2
+
+res <- cuda_resident_subsets(X, y, idx_list, lambda, "resident")
+cold <- cuda_resident_subsets(X, y, idx_list, lambda, "cold")
+
+stopifnot(all(res$info == 0L), all(cold$info == 0L))
+stopifnot(isTRUE(all.equal(res$beta, cold$beta, tolerance = 1e-8)))
+max_cf <- max(vapply(seq_along(idx_list), function(b) {
+  max(abs(res$beta[, b] - cf_beta(X, y, idx_list[[b]], lambda)))
+}, numeric(1)))
+stopifnot(max_cf < 1e-6)
+cat(sprintf("backend cuda=%s | resident==cold | max|beta-closed form|=%.2e\n",
+            res$cuda, max_cf))
+```
+
+## Reference measurement
+
+Measured 2026-11-20 on an NVIDIA RTX 4070 Laptop GPU (8 GB), CUDA Toolkit
+13.1, R 4.6.1 and cudaGlmnet 0.0.0.9011 (GPU backend). Config: `n = 12000`,
+`p = 80`, `m = 6000`, `lambda = 0.1`, `B` from 1 to 32 subsets; one warm-up
+then the median of repeated `system.time()` runs. Wall times in seconds; these
+are a snapshot, not a performance guarantee.
+
+| B subsets | resident (s) | cold (s) | cold / resident |
+|---|---|---|---|
+| 1 | 0.0090 | 0.0100 | 1.11x |
+| 2 | 0.0120 | 0.0140 | 1.17x |
+| 4 | 0.0190 | 0.0230 | 1.21x |
+| 8 | 0.0280 | 0.0380 | 1.36x |
+| 16 | 0.0460 | 0.0590 | 1.28x |
+| 32 | 0.0780 | 0.1210 | 1.55x |
+
+```{r roi-plot, echo = FALSE, fig.width = 7, fig.height = 4}
+Bs <- c(1L, 2L, 4L, 8L, 16L, 32L)
+res_t <- c(0.0090, 0.0120, 0.0190, 0.0280, 0.0460, 0.0780)
+cold_t <- c(0.0100, 0.0140, 0.0230, 0.0380, 0.0590, 0.1210)
+op <- par(mfrow = c(1, 2), mar = c(4.5, 4.5, 2.5, 1))
+plot(Bs, cold_t, type = "b", pch = 19, col = "grey40", lwd = 2,
+     ylim = c(0, max(cold_t) * 1.05),
+     xlab = "Number of subsets (B)", ylab = "Cumulative wall time (s)",
+     main = "One call fitting B subsets")
+lines(Bs, res_t, type = "b", pch = 19, col = "steelblue", lwd = 2)
+legend("topleft", legend = c("cold (re-upload)", "resident (gather)"),
+       col = c("grey40", "steelblue"), pch = 19, lty = 1, bty = "n")
+plot(Bs, cold_t / res_t, type = "b", pch = 19, col = "darkorange", lwd = 2,
+     ylim = c(1, 1.7), xlab = "Number of subsets (B)",
+     ylab = "cold / resident speedup (x)", main = "Ratio bends upward")
+abline(h = 1, lty = 2, col = "grey40")
+par(op)
+```
+
+The resident line has a **flatter slope**: from `B = 1` to `B = 32` the
+marginal cost is about `0.0022 s/subset` for resident versus `0.0036 s/subset`
+for cold (roughly 1.6x). Because resident pays the full-panel upload once and
+then only cheap device-side gathers, the cold/resident ratio **grows** with `B`
+(from 1.11x to 1.55x) -- the flat curve from Stage 1 bends upward here for the
+first time. Absolute times are small (tens of milliseconds), so individual
+ratios are noisy; the reproducible signal is the slope difference, not any
+single row.
+
+```{r live-timing, eval = RUN}
+cfg <- make_data(12000L, 80L)
+Xb <- cfg$X
+yb <- cfg$y
+m <- 6000L
+lam <- 0.1
+Bs_live <- c(1L, 4L, 16L)
+idx_live <- replicate(max(Bs_live), sample.int(12000L, m), simplify = FALSE)
+
+rows <- lapply(Bs_live, function(B) {
+  sub <- idx_live[seq_len(B)]
+  t_res <- time_median(function() {
+    cuda_resident_subsets(Xb, yb, sub, lam, "resident")
+  }, reps = 2L)
+  t_cold <- time_median(function() {
+    cuda_resident_subsets(Xb, yb, sub, lam, "cold")
+  }, reps = 2L)
+  data.frame(
+    B = B,
+    resident = sprintf("%.4f", t_res),
+    cold = sprintf("%.4f", t_cold),
+    ratio = sprintf("%.2fx", t_cold / t_res)
+  )
+})
+
+knitr::kable(
+  do.call(rbind, rows),
+  caption = "Device-resident subset refits (wall time, seconds)."
+)
+```
+
+## Interpreting the numbers
+
+This is an empirical demonstration that keeping a matrix resident and
+selecting subsets on the device removes the per-subset re-upload. It is **not**
+a claim that closed-form ridge is faster than `glmnet`, an iterative solver, or
+a dual/Woodbury solve. In fact the `p x p` Gram matrix and Cholesky here are
+demo-scale: for production `p >> n` data one would solve the much smaller dual
+`(X X' + m*lambda*I)` system instead. The `m*lambda*I` diagonal is constant
+across the equal-size subsets, so it is uploaded once; `syrk` fills only the
+lower triangle and `potrf` / `potrs` read that same triangle.
+
+Read the ratio against the right baseline. Both strategies share one context
+and one identical solve per subset; the resident strategy's advantage is
+purely that it transforms `B` full host-to-device uploads into one upload plus
+`B` device-side gathers. That advantage grows with `B` because the one upload
+is amortized -- exactly the cross-subset residency that the earlier benchmarks
+could not show.
+
+The live chunk uses fewer repetitions than the reference table to keep build
+time down, so its absolute numbers will differ from the snapshot for that
+reason as well as for hardware differences.
+
+## Enabling the live benchmark
+
+The correctness chunk above always runs, on either backend. The live timing
+chunk runs only when `rcupp::cuda_available()` is `TRUE`. CI runners have no
+CUDA Toolkit, so `rcupp` builds its CPU reference shim there and the timing
+chunk is skipped; the reference table and plot above are static snapshots from
+a GPU machine. Note that the CPU shim still needs an `rcupp` built with the
+B-stage parts (`gather_rows` / `syrk` / `potrf` / `potrs`); see the CUDA build
+notes in the `gpu-lasso-comparison` vignette.

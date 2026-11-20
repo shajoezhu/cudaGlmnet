@@ -1,5 +1,6 @@
 ABI
 autoconf
+BGEN
 coef
 composable
 conda
@@ -22,6 +23,7 @@ glmnet's
 gputools
 installable
 KKT
+LD
 Lipschitz
 md
 nvcc
@@ -33,6 +35,7 @@ rcupp
 rcupp's
 roadmap
 rpath
+ROI
 RTX
 standardisation
 Standardisation

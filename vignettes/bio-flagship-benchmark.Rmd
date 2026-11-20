@@ -1,0 +1,373 @@
+---
+title: "Benchmark: reference-panel selection as repeated ridge fits"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Benchmark: reference-panel selection as repeated ridge fits}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+HAS_GLMNET <- requireNamespace("glmnet", quietly = TRUE)
+HAS_CUDA <- isTRUE(rcupp::cuda_available())
+RUN <- HAS_GLMNET && HAS_CUDA
+```
+
+```{r status, echo = FALSE}
+if (!RUN) {
+  cat("Live benchmark skipped: needs glmnet and a CUDA backend.\n")
+}
+```
+
+```{r helpers, include = FALSE}
+# A fixed "reference panel": n genotyped/assay samples, p markers or features,
+# with five planted nonzero effects. p >> n is the genomic-selection shape.
+make_data <- function(n, p, seed = 42L) {
+  set.seed(seed)
+  X <- matrix(rnorm(n * p), n, p)
+  beta <- rep(0, p)
+  beta[1:5] <- c(2, -1.5, 1, -0.5, 0.75)
+  list(X = X, y = drop(X %*% beta) + rnorm(n, sd = 0.5))
+}
+
+# Standardize once on the host (column population variance 1, y centred) so
+# the GPU path, the pure-R oracle and the closed form solve the IDENTICAL
+# problem with standardize = FALSE, intercept = FALSE.
+std_data <- function(d) {
+  nr <- nrow(d$X)
+  nc <- ncol(d$X)
+  Xc <- d$X - matrix(colMeans(d$X), nr, nc, byrow = TRUE)
+  xs <- sqrt(colMeans(Xc^2))
+  list(X = Xc / matrix(xs, nr, nc, byrow = TRUE), y = d$y - mean(d$y))
+}
+
+make_grid <- function(Xs, yc, nl = 30L) {
+  lmax <- max(abs(as.vector(crossprod(Xs, yc)))) / nrow(Xs)
+  exp(seq(log(lmax), log(0.01 * lmax), length.out = nl))
+}
+
+# Dual (Woodbury) closed form: O(n^3), cheap when p >> n. Algebraically equal
+# to the primal (X'X + n*lambda*I)^-1 X'y, so it is a fair, non-straw-man gate.
+cf_dual <- function(Xs, yc, lam) {
+  nr <- nrow(Xs)
+  drop(crossprod(Xs, solve(tcrossprod(Xs) + nr * lam * diag(nr), yc)))
+}
+
+time_median <- function(f, reps = 3L) {
+  f()
+  median(replicate(reps, system.time(f())[["elapsed"]]))
+}
+
+# Candidate reference panels = bootstrap row-resamples of ONE fixed panel.
+# Each has a DIFFERENT X, which is the whole point of this case study.
+make_panels <- function(n, K) {
+  lapply(seq_len(K), function(k) {
+    set.seed(1000L + k)
+    sample(seq_len(n), n, replace = TRUE)
+  })
+}
+```
+
+This vignette is a **measurement, not a performance claim**. It asks a
+narrow, decision-relevant question about a `p >> n` genomics workload: if the
+analysis is *repeated penalized-regression fitting* -- optimization of a
+training / reference panel, cross-validation over folds, or bootstrap
+stability of estimated marker effects -- where does the device-resident
+substrate of `cuda_glmnet()` actually pay off, and where does it not?
+
+The workload matters more than the domain label. `cuda_glmnet()` fits a whole
+lambda path in **one device context**: the design matrix and response are
+uploaded once, every inner-loop operator runs on device-resident buffers, and
+only one length-`p` coefficient vector is downloaded per lambda. That is a
+strong fit for "the same `X`, fitted many times", which is exactly the shape of
+a lambda path, or of CV/bootstrap refits *within one candidate panel*.
+
+Reference-panel *selection*, however, compares many candidate panels. Each
+candidate is a different subset of samples, so its `X` differs. `cuda_glmnet()`
+is a pure-R API: every call rebuilds its context and re-uploads the whole `X`.
+So the residency win can amortize **within** a panel but **not across**
+panels. This vignette measures both sides of that statement, reports the
+second one honestly (a flat ROI curve), and names the operator that would be
+needed to bend it.
+
+## Method
+
+- One fixed reference panel: `n` samples, `p` markers/features with five
+  planted nonzero effects, `p >= n` (the genomic-selection shape). Data are
+  standardized on the host, so `cuda_glmnet()`, `enet_fista_cpu()` and the
+  dual closed form all solve the same problem with
+  `standardize = FALSE, intercept = FALSE`.
+- A shared 30-value log-spaced lambda grid from `lambda.max` down to
+  `0.01 * lambda.max`.
+- Two workloads:
+  1. **one panel, one path** -- a single `cuda_glmnet()` call with the 30-value
+     grid, versus 30 cold single-lambda calls, versus 30 pure-R oracle solves;
+  2. **K candidate panels** -- `K` bootstrap row-resamples of the fixed panel,
+     each refit with one 30-lambda path. Cumulative wall time is measured for
+     `K = 1, 2, 4, 8`.
+- Correctness gate before timing: at a mid-grid lambda, the GPU path must
+  match the dual closed form to `< 1e-3` and the pure-R oracle to `< 1e-6`.
+  Measured agreement is `~1e-7` and `~1e-16` respectively, so all methods do
+  comparable numerical work.
+- `glmnet` is a **timing-only reference**. Its ridge objective / lambda scaling
+  / convergence controls differ from this package's, so we draw no coefficient
+  parity with it. A one-off single-lambda fit is also simply not the workload
+  the resident substrate is built for.
+- Only the CUDA backend is timed. On a machine without a CUDA toolkit `rcupp`
+  builds a CPU reference shim whose timings are not representative, so the
+  live chunks are guarded by `requireNamespace("glmnet")` and
+  `rcupp::cuda_available()`.
+
+## Reference measurement
+
+Measured 2026-11-19 on an NVIDIA RTX 4070 Laptop GPU (8 GB), CUDA Toolkit
+13.1, R 4.6.1, glmnet and cudaGlmnet 0.0.0.9011 (GPU backend). Wall times in
+seconds; these are a snapshot, not a performance guarantee. The live chunks
+below regenerate lighter versions on any machine with a CUDA backend.
+
+## Workload 1: within one panel, the residency win
+
+For one fixed reference panel, a whole 30-lambda path in one device context is
+2.7--6.0x faster than 30 cold `cuda_glmnet()` fits and 1.8--5.8x faster than
+30 pure-R solves of the identical FISTA. This is the advantage already shown
+by the `ridge-benchmark` vignette, here re-measured on `p >= n` genomics
+shapes.
+
+| n | p | lambdas | one resident path (s) | 30 cold fits (s) | 30 pure-R solves (s) | cold / path | oracle / path |
+|---|---|---|---|---|---|---|---|
+| 200 | 1000 | 30 | 1.059 | 2.894 | 1.882 | 2.7x | 1.8x |
+| 200 | 2000 | 30 | 0.752 | 4.421 | 3.774 | 5.9x | 5.0x |
+| 400 | 2000 | 30 | 1.501 | 8.989 | 8.685 | 6.0x | 5.8x |
+
+Coefficients agree with the dual closed form to `<= 4e-7` and with the pure-R
+oracle to `<= 8e-16`. `cold / path` is the residency payoff: one upload versus
+thirty. `oracle / path` is the compiled-vs-interpreted payoff. Note that at the
+smallest shape the pure-R oracle is even faster than 30 cold GPU fits -- cold
+starts dominate at small sizes -- so the win is specifically about keeping one
+context alive for many lambdas, not about GPU versus R in the abstract.
+
+```{r path-benchmark, eval = RUN}
+# Light regeneration: one shape, fewer repetitions than the static table.
+path_configs <- data.frame(n = 200L, p = 2000L)
+path_rows <- lapply(seq_len(nrow(path_configs)), function(i) {
+  n <- path_configs$n[i]
+  p <- path_configs$p[i]
+  st <- std_data(make_data(n, p))
+  Xs <- st$X
+  yc <- st$y
+  grid <- make_grid(Xs, yc)
+  lam <- grid[length(grid) %/% 2L]
+  bg <- drop(cuda_glmnet(Xs, yc, lambda = lam, alpha = 0,
+                         standardize = FALSE, intercept = FALSE)$beta)
+  bcf <- cf_dual(Xs, yc, lam)
+  bor <- enet_fista_cpu(Xs, yc, lam, alpha = 0)$coefficients
+  stopifnot(max(abs(bg - bcf)) < 1e-3, max(abs(bg - bor)) < 1e-6)
+
+  one <- function() {
+    cuda_glmnet(Xs, yc, lambda = grid, alpha = 0,
+                standardize = FALSE, intercept = FALSE)
+  }
+  cold <- function() {
+    for (l in grid) {
+      cuda_glmnet(Xs, yc, lambda = l, alpha = 0,
+                  standardize = FALSE, intercept = FALSE)
+    }
+  }
+  r30 <- function() {
+    for (l in grid) {
+      enet_fista_cpu(Xs, yc, l, alpha = 0)
+    }
+  }
+  t_one <- time_median(one, reps = 2L)
+  t_cold <- time_median(cold, reps = 1L)
+  t_r30 <- time_median(r30, reps = 1L)
+  data.frame(
+    n = n, p = p, lambdas = length(grid),
+    resident_path = sprintf("%.3f", t_one),
+    cold_fits = sprintf("%.3f", t_cold),
+    pureR_path = sprintf("%.3f", t_r30),
+    cold_over_path = sprintf("%.1fx", t_cold / t_one),
+    oracle_over_path = sprintf("%.1fx", t_r30 / t_one)
+  )
+})
+knitr::kable(
+  do.call(rbind, path_rows),
+  caption = "One 30-lambda ridge path, three ways (wall time, seconds)."
+)
+```
+
+## Workload 2: across candidate panels, the ROI is flat
+
+Reference-panel optimization, K-fold CV and bootstrap stability all refit the
+model on **many different sample subsets**. Each subset has a different `X`, so
+`cuda_glmnet()` re-uploads the whole matrix on every call. The within-panel win
+above therefore cannot compound across panels.
+
+The table measures cumulative wall time for `K` bootstrap-resampled candidate
+panels (`n = 200, p = 2000`), each refit with one 30-lambda path. "resident" is
+one `cuda_glmnet()` path call per panel; "cold" is 30 single-lambda calls per
+panel.
+
+| K panels | resident, K paths (s) | cold, K x 30 fits (s) | resident per panel (s) | cold / resident |
+|---|---|---|---|---|
+| 1 | 1.393 | 5.128 | 1.393 | 3.7x |
+| 2 | 3.117 | 11.514 | 1.559 | 3.7x |
+| 4 | 7.597 | 23.137 | 1.899 | 3.0x |
+| 8 | 14.198 | 48.848 | 1.775 | 3.4x |
+
+`resident per panel` is roughly constant and `cold / resident` stays near
+3--4x regardless of `K`. Both curves are essentially straight lines from the
+origin: doubling the number of candidate panels doubles the time. The speedup
+is a per-panel constant, **not a growing return on more panels**. A device-side
+row-gather operator -- keep the full panel resident once, then select each
+subset's rows on device -- is what would remove the per-panel upload and make
+the resident curve bend. That operator is the subject of a later phase; the
+current public C ABI has whole-buffer uploads but no device-side row indexing.
+
+```{r roi-plot, echo = FALSE, fig.width = 7, fig.height = 4}
+Ks <- c(1L, 2L, 4L, 8L)
+resident <- c(1.393, 3.117, 7.597, 14.198)
+cold <- c(5.128, 11.514, 23.137, 48.848)
+op <- par(mfrow = c(1, 2), mar = c(4.5, 4.5, 2.5, 1))
+plot(Ks, cold, type = "b", pch = 19, col = "grey40", lwd = 2,
+     ylim = c(0, max(cold) * 1.05),
+     xlab = "Number of candidate panels (K)",
+     ylab = "Cumulative wall time (s)",
+     main = "Cumulative refit time")
+lines(Ks, resident, type = "b", pch = 19, col = "steelblue", lwd = 2)
+legend("topleft", legend = c("cold (30 fits/panel)", "resident (1 path/panel)"),
+       col = c("grey40", "steelblue"), pch = 19, lty = 1, bty = "n")
+plot(Ks, cold / resident, type = "b", pch = 19, col = "darkorange", lwd = 2,
+     ylim = c(0, 5), xlab = "Number of candidate panels (K)",
+     ylab = "cold / resident speedup (x)",
+     main = "Speedup does not grow with K")
+abline(h = mean(cold / resident), lty = 2, col = "grey40")
+par(op)
+```
+
+```{r subset-benchmark, eval = RUN}
+n <- 200L
+p <- 2000L
+st <- std_data(make_data(n, p))
+Xs <- st$X
+yc <- st$y
+grid <- make_grid(Xs, yc)
+Ks_live <- c(1L, 2L, 4L)
+panels <- make_panels(n, max(Ks_live))
+j <- length(grid) %/% 2L
+# Correctness gate on the first resample: resident path matches the closed
+# form at a mid-grid lambda.
+idx0 <- panels[[1L]]
+X0 <- Xs[idx0, , drop = FALSE]
+y0 <- yc[idx0]
+b0 <- drop(cuda_glmnet(X0, y0, lambda = grid[j], alpha = 0,
+                       standardize = FALSE, intercept = FALSE)$beta)
+stopifnot(max(abs(b0 - cf_dual(X0, y0, grid[j]))) < 1e-3)
+
+# Light regeneration: only the resident strategy, fewer panels/repetitions
+# than the static table. The cold baseline is in the static table / ROI plot.
+subset_rows <- lapply(Ks_live, function(K) {
+  idxs <- panels[seq_len(K)]
+  resident <- function() {
+    for (idx in idxs) {
+      cuda_glmnet(Xs[idx, , drop = FALSE], yc[idx], lambda = grid, alpha = 0,
+                  standardize = FALSE, intercept = FALSE)
+    }
+  }
+  t_res <- time_median(resident, reps = 1L)
+  data.frame(
+    K = K,
+    resident = sprintf("%.3f", t_res),
+    resident_per_panel = sprintf("%.3f", t_res / K)
+  )
+})
+knitr::kable(
+  do.call(rbind, subset_rows),
+  caption = "Cumulative resident refit time vs candidate panels (seconds)."
+)
+```
+
+### Bootstrap stability of estimated effects
+
+The reason to run those resamples is to measure the stability of the estimated
+marker effects. Because `cuda_glmnet()` returns a `p x length(lambda)`
+coefficient matrix per call, the same refits feed a stability statistic at no
+extra fitting cost. The chunk below reports the standard deviation, across `B`
+resamples, of each of the five planted effects at a mid-grid lambda -- a plain
+coefficient-stability check used in genomic selection. Smaller is more stable;
+this is illustrative of the workflow, not a claim about recovery accuracy.
+
+```{r stability, eval = RUN}
+n_s <- 200L
+p_s <- 2000L
+st_s <- std_data(make_data(n_s, p_s))
+Xs_s <- st_s$X
+yc_s <- st_s$y
+grid_s <- make_grid(Xs_s, yc_s)
+j_s <- length(grid_s) %/% 2L
+B <- 8L
+idx_list <- make_panels(n_s, B)
+# Explicit loop so the resample index and its beta stay together.
+coef_mat <- matrix(0, B, 5L)
+for (b in seq_len(B)) {
+  idx <- idx_list[[b]]
+  Xb <- Xs_s[idx, , drop = FALSE]
+  yb <- yc_s[idx]
+  fit <- cuda_glmnet(Xb, yb, lambda = grid_s[j_s], alpha = 0,
+                     standardize = FALSE, intercept = FALSE)
+  coef_mat[b, ] <- drop(fit$beta)[1:5]
+}
+sds <- apply(coef_mat, 2, sd)
+cat("planted-effect coef SD across resamples:",
+    paste(sprintf("%.3f", sds), collapse = " "), "\n")
+```
+
+## Where it does not win: a single fit
+
+For one fixed lambda, `glmnet` is faster. On the `n = 200, p = 2000` panel, a
+single-lambda `glmnet(alpha = 0)` fit took `0.054 s` and `cuda_glmnet()` took
+`0.168 s`. A one-off ridge solve is a single linear system, and `glmnet`'s
+compiled coordinate descent is the right tool. `cuda_glmnet` is a composable
+GPU substrate, not a drop-in replacement for `glmnet`. Any honest end-to-end
+ROI for a genomics pipeline must also charge CPU/IO-bound steps that are not
+measured here -- genotype QC, LD pruning, phasing and imputation,
+standardization -- and note that the current `cuda_glmnet()` accepts dense
+double `x` only, so bed/BGEN/dosage conversion costs are extra.
+
+## Interpreting the numbers
+
+Within a single reference panel, device residency pays off: one upload, many
+lambdas, 3--6x over cold starts. Repeated CV folds and bootstrap resamples
+*within that panel* inherit this per-refit win. But selecting the panel itself
+means comparing many sample subsets with different `X`; with a pure-R API that
+re-uploads on every call, the return on those refits is a flat constant, not a
+compounding advantage. This is the genomic analogue of the rolling-window gap
+noted in the project roadmap: every window / subset restarts `set_data` and
+re-uploads.
+
+That gap is a statement about the substrate, not about the algorithm. The
+current public C ABI (`rcupp.h`, Phase 0) offers whole-buffer `buf_upload` and
+resident `gemv`/`ger`, but no device-side row-index / submatrix view / gather.
+Adding a "keep the full panel resident, gather each subset's rows on device"
+operator -- together with a `syrk` / Cholesky closed-form part -- would turn
+`K` uploads into one and let the resident curve bend. That is a later phase;
+this vignette is the honest baseline it must beat, and a design-partner
+illustration of why "the same `X`, fitted many times" is the workload to
+optimize for.
+
+The live timing chunks use fewer configurations, workloads and repetitions
+than the reference tables to keep build time down, so their absolute numbers
+will differ from the snapshot for that reason as well as for hardware
+differences. `glmnet` appears only as a timing reference; coefficient-
+correctness gates use the dual closed form and `enet_fista_cpu()`.
+
+## Enabling the live benchmark
+
+The live chunks run only when `glmnet` is installed and
+`rcupp::cuda_available()` is `TRUE`. CI runners have no CUDA Toolkit, so
+`rcupp` builds its CPU reference shim there and the chunks are skipped; the
+reference tables and the ROI plot above are static snapshots from a GPU
+machine. See the CUDA build notes in the `gpu-lasso-comparison` vignette for
+how to link the GPU backend.
