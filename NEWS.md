@@ -1,3 +1,7 @@
+# cudaGlmnet 0.0.0.9012
+
+* Development version bumped from 0.0.0.9011.
+
 # cudaGlmnet 0.0.0.9011
 
 * Add `cuda_resident_subsets()`: a downstream composition that keeps one full
