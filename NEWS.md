@@ -1,3 +1,7 @@
+# cudaGlmnet 0.0.0.9014
+
+* Development version bumped from 0.0.0.9013.
+
 # cudaGlmnet 0.0.0.9013
 
 * Add a dual / Woodbury route to `cuda_resident_subsets()` via a new `method`
