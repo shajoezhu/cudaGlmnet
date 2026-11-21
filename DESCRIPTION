@@ -1,7 +1,7 @@
 Package: cudaGlmnet
 Type: Package
 Title: Minimal GPU Gaussian Lasso via rcupp
-Version: 0.0.0.9015
+Version: 0.0.0.9016
 Authors@R: person("Joe", "Zhu", email = "sha.joe.zhu@gmail.com", role = c("aut", "cre"))
 Author: Joe Zhu [aut, cre]
 Maintainer: Joe Zhu <sha.joe.zhu@gmail.com>

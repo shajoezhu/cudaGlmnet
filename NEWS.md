@@ -1,3 +1,7 @@
+# cudaGlmnet 0.0.0.9016
+
+* Development version bumped from 0.0.0.9015.
+
 # cudaGlmnet 0.0.0.9015
 
 * **Breaking numerical contract change (alpha < 1):** `cuda_glmnet()` and
