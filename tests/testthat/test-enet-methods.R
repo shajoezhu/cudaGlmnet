@@ -19,7 +19,9 @@ test_that("standardisation and intercept still map back correctly", {
   lam <- 0.05
   fit <- cuda_glmnet(d$X, d$y, lambda = lam, alpha = 0.5)
   prep <- cudaGlmnet:::.cg_prep(d$X, d$y, TRUE, TRUE)
-  ref <- enet_fista_cpu(prep$Xs, prep$ys, lam, alpha = 0.5)
+  conv <- cudaGlmnet:::.cg_glmnet_to_cuda(prep, 0.5)
+  ref <- enet_fista_cpu(prep$Xs, prep$ys, lam * conv$lambda_scale,
+                        alpha = conv$alpha_c)
   expect_equal(as.numeric(fit$beta), ref$coefficients / prep$xs,
                tolerance = 1e-8)
   expect_equal(fit$a0, prep$ym - sum(prep$xm * ref$coefficients / prep$xs),

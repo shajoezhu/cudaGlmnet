@@ -24,11 +24,14 @@ cuda_glmnet(
 
 \item{y}{Numeric response of length \code{n}.}
 
-\item{lambda}{Optional numeric vector of penalties (sorted decreasing
-internally). If \code{NULL} (default), a log-spaced path of length
-\code{nlambda} is generated from \code{max(abs(crossprod(X, y)))/n} down to
+\item{lambda}{Optional numeric vector of penalties in glmnet's convention
+(sorted decreasing internally). If \code{NULL} (default), a log-spaced
+path of length \code{nlambda} is generated from
+\code{max(abs(crossprod(X, y)))/n} down to
 \code{lambda.max * lambda.min.ratio}. For \code{alpha < 1} the largest
-penalty is divided by \code{alpha} (glmnet-style KKT at \code{beta = 0}).}
+penalty is divided by \code{alpha} (glmnet-style KKT at \code{beta = 0}).
+The path is returned unchanged (glmnet convention); the internal solve
+uses the remapped values (see \code{Numerical notes}).}
 
 \item{nlambda}{Number of lambda values when \code{lambda = NULL}.}
 
@@ -42,9 +45,11 @@ Defaults to \code{0.01} when \code{n < p}, else \code{1e-4}
 \item{intercept}{Fit an unpenalised intercept by centering (default
 \code{TRUE}).}
 
-\item{alpha}{Elastic-net mixing in \code{[0, 1]}; \code{1} (default) is the
-lasso, \code{0} is pure ridge. The default keeps the lasso path
-bit-identical to earlier versions.}
+\item{alpha}{Elastic-net mixing in \code{[0, 1]} in glmnet's convention;
+\code{1} (default) is the lasso, \code{0} is pure ridge. The default keeps
+the lasso path bit-identical to earlier versions. See
+\code{Numerical notes} for the (data-dependent) remap applied for
+\code{alpha < 1}.}
 
 \item{max_iter}{Maximum FISTA iterations per lambda.}
 
@@ -62,7 +67,8 @@ An object of class \code{"cuda_glmnet"}: a list with \code{beta}
 \code{a0} (intercepts), \code{lambda}, \code{nzero}, \code{dev.ratio},
 \code{nulldev},
 \code{iterations}, \code{converged}, \code{backend}, \code{nobs},
-\code{nvars}, \code{standardize}, \code{intercept} and \code{call}.
+\code{nvars}, \code{standardize}, \code{intercept}, \code{alpha} (the
+glmnet-convention mixing parameter) and \code{call}.
 }
 \description{
 A glmnet-compatible front end over the GPU FISTA solver in \pkg{rcupp}.
@@ -80,19 +86,34 @@ back to the original scale, so results are directly comparable to
 }
 \section{Numerical notes}{
 
-The objective is \code{1/(2n)||y - a0 - X beta||^2 + lambda P(beta)}, where
-the penalty is \code{(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1}. Set
-\code{alpha = 1} for the lasso, \code{alpha = 0} for pure ridge, or a value
-in between for the elastic net. Standardisation uses the population
-(\code{1/n}) scale. For \code{alpha = 1} the path is fitted through a single
-\pkg{rcupp} lasso session (cold starts, \code{warm_start = FALSE}, stay
-bit-identical to a one-shot \code{rcupp::lasso_fista()} solve). For
+\code{lambda} and \code{alpha} follow \code{glmnet}'s Gaussian convention.
+glmnet fits on an RMS-standardised response (\code{y/s},
+\code{s = sqrt(mean(y^2))}) and reports lambda / coefficients in raw-y
+units, so its penalty in raw-y units is
+\code{lambda[(1/s)(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1]}. To be
+drop-in compatible without baking that data-dependent factor into the
+solver, \code{cuda_glmnet()} keeps the standard elastic net
+\code{lambda_c[(1-alpha_c)/2 ||beta||_2^2 + alpha_c ||beta||_1]} internally
+and maps \code{(lambda, alpha)} to \code{(lambda_c, alpha_c)} via
+\code{alpha_c = s*alpha/(1-alpha+s*alpha)} and
+\code{lambda_c = lambda*(1-alpha+s*alpha)/s}. A given \code{(lambda, alpha)}
+therefore reproduces \code{glmnet::glmnet(lambda, alpha)}. At
+\code{alpha = 1} the map is the identity (lasso unchanged); at
+\code{alpha = 0} it is \code{lambda_c = lambda/s}. A scalar rescaling of
+\code{lambda} alone cannot work for \code{0 < alpha < 1}, because the ridge
+and lasso penalties need different scalings.
+
+Fitting is done on centered/standardised \code{(Xs, ys)} with the population
+(\code{1/n}) scale, then coefficients are mapped back to the original scale.
+\code{\link[=enet_fista_cpu]{enet_fista_cpu()}} is the pure-R oracle for the \emph{standard} objective;
+it must be called with the remapped \code{(lambda_c, alpha_c)} to reproduce a
+\code{cuda_glmnet()} fit. For \code{alpha = 1} the path is fitted through a
+single \pkg{rcupp} lasso session (cold starts, \code{warm_start = FALSE},
+stay bit-identical to a one-shot \code{rcupp::lasso_fista()} solve). For
 \code{alpha < 1} it is fitted by a downstream \code{Rcpp} + \pkg{rcupp}
 loop over resident device operators, with the design uploaded once. In
 both cases \code{warm_start = TRUE} seeds each fit from the previous
-solution (fewer iterations, same optimum, not bit-identical). FISTA and
-the coordinate descent of glmnet solve the same objective but need not
-agree bit-for-bit.
+solution (fewer iterations, same optimum, not bit-identical).
 }
 
 \examples{

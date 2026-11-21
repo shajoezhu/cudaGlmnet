@@ -51,12 +51,16 @@ coef(cv, s = "lambda.1se")
 
 ## Elastic net and ridge
 
-The `alpha` argument blends the lasso and ridge penalties: `alpha = 1` (the
-default) is the lasso, `alpha = 0` is pure ridge, and values in between give
-the elastic net. For `alpha < 1` the solver loop is composed downstream
-(Rcpp glue plus rcupp substrate) from rcupp's resident device operators,
-with the design uploaded to the device once; rcupp itself stays
-algorithm-agnostic. `enet_fista_cpu()` is the matching pure-R oracle.
+The `alpha` argument blends the lasso and ridge penalties in **glmnet's
+convention**: `alpha = 1` (the default) is the lasso, `alpha = 0` is pure ridge,
+and values in between give the elastic net, so `cuda_glmnet(X, y, lambda, alpha)`
+reproduces `glmnet::glmnet(X, y, lambda, alpha)` (the internal lambda/alpha
+remap is described in the `cuda_glmnet` help). For `alpha < 1` the solver loop is
+composed downstream (Rcpp glue plus rcupp substrate) from rcupp's resident
+device operators, with the design uploaded to the device once; rcupp itself
+stays algorithm-agnostic. `enet_fista_cpu()` is the matching pure-R oracle for
+the standard objective the solver uses internally (call it with the remapped
+parameters to reproduce a fit).
 
 ```{r enet}
 en <- cuda_glmnet(X, y, alpha = 0.5, nlambda = 10)

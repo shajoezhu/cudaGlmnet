@@ -30,7 +30,9 @@ If you want the raw operators/sessions instead of a glmnet-style API, use
   unchanged as the **numerical reference** (no intercept / standardization).
 - `lasso_fista_cpu()` — a pure-R FISTA oracle with the identical numerical
   contract, used to verify the compiled path.
-- `enet_fista_cpu()` — the pure-R elastic-net / ridge oracle for `alpha < 1`.
+- `enet_fista_cpu()` — the pure-R oracle for the **standard** elastic-net
+  objective the solver uses internally; reproduce a `cuda_glmnet(λ, α)` fit by
+  passing the remapped `(λ_c, α_c)` (see below).
 
 For `alpha = 1` a whole lambda path (and each CV fold) runs through **one
 `rcupp` lasso session**: `X`/`y` are uploaded to the device once and the
@@ -98,13 +100,21 @@ max(abs(coef(ref) - lasso_fista_cpu(X, y, 0.05)$coefficients))  # ~0
   `SLrcupp` package (`SL.rcupp`), which selects `lambda.min` / `lambda.1se`
   via `cv.cuda_glmnet()`; the in-package `SL.cudaGlmnet` is a thinner wrapper
   predicting at a single penalty. Both are kept intentionally.
-- FISTA and glmnet's coordinate descent solve the **same objective** but use
-  different algorithms and convergence criteria: the drop-in promises agreement
-  within tolerance, not bit-for-bit reproduction of glmnet's solution path.
-- Benchmarks compare against the **pure-R** FISTA oracle, not glmnet's compiled
-  Fortran; read speedups accordingly. GPU acceleration is real but conditional
-  on problem size (large single fits and `p >> n` workloads win; many tiny
-  rolling-window fits can lose).
+- `lambda` / `alpha` for `alpha < 1` are in **glmnet's convention**: glmnet fits
+  on an RMS-standardised response (`y/s`, `s = sqrt(mean(y²))`) and reports
+  coefficients in raw-y units, so its ridge penalty carries an extra `1/s` that
+  the lasso penalty does not. `cuda_glmnet()` keeps its clean standard objective
+  internally and maps `α_c = sα/(1−α+sα)`, `λ_c = λ(1−α+sα)/s`, so a given
+  `(λ, α)` reproduces `glmnet::glmnet(λ, α)` (~1e-6 with default tolerances).
+  A scalar rescaling of `λ` alone cannot work for `0 < α < 1`. At `α = 1` the
+  map is the identity (lasso unchanged). This is a **breaking change** from
+  versions before 0.0.0.9015, where `λ`/`α` fed the standard objective directly.
+- Older benchmarks compare against the **pure-R** FISTA oracle, not glmnet's
+  compiled Fortran; read their speedups accordingly. New fair-comparison
+  (`benchmark/fair_competitors.R`) and subset-ridge scripts add glmnet/real
+  competitor baselines. GPU acceleration is real but workload-specific
+  (repeated `p >> n` closed-form subset solves win; generic lasso paths lose to
+  glmnet Fortran).
 - A comparison vignette (`gpu-lasso-comparison`) contrasts with
   `cuda.ml::cuda_ml_lasso()` and `gputools`; `cuda.ml` is an optional `Suggests`
   and the vignette skips gracefully when it (or its RAPIDS runtime) is absent.

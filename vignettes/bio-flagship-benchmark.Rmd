@@ -32,15 +32,19 @@ make_data <- function(n, p, seed = 42L) {
   list(X = X, y = drop(X %*% beta) + rnorm(n, sd = 0.5))
 }
 
-# Standardize once on the host (column population variance 1, y centred) so
-# the GPU path, the pure-R oracle and the closed form solve the IDENTICAL
-# problem with standardize = FALSE, intercept = FALSE.
+# Standardize once on the host (column population variance 1, y centred AND
+# scaled to unit RMS) so the GPU path, the pure-R oracle and the closed form
+# solve the IDENTICAL problem with standardize = FALSE, intercept = FALSE.
+# Unit-RMS y makes s = sqrt(mean(y^2)) = 1, so cudaGlmnet's glmnet-convention
+# lambda equals the standard-objective lambda (the remap is the identity).
 std_data <- function(d) {
   nr <- nrow(d$X)
   nc <- ncol(d$X)
   Xc <- d$X - matrix(colMeans(d$X), nr, nc, byrow = TRUE)
   xs <- sqrt(colMeans(Xc^2))
-  list(X = Xc / matrix(xs, nr, nc, byrow = TRUE), y = d$y - mean(d$y))
+  yc <- d$y - mean(d$y)
+  list(X = Xc / matrix(xs, nr, nc, byrow = TRUE),
+       y = yc / sqrt(mean(yc^2)))
 }
 
 make_grid <- function(Xs, yc, nl = 30L) {

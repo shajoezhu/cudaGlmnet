@@ -7,8 +7,16 @@ NULL
 # untouched so the demo, the three benchmarks and lasso_fista_cpu() keep their
 # exact numerical reference contract.
 #
-# Numerical convention matches glmnet's Gaussian objective:
-#   minimise 1/(2n) ||y - a0 - X beta||^2 + lambda ||beta||_1
+# lambda / alpha follow glmnet's Gaussian convention. glmnet fits on an
+# RMS-standardised response (y/s, s = sqrt(mean(y^2))) and reports lambda and
+# coefficients in raw-y units, which in raw-y units is the penalty
+#   lambda * [ (1/s)(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1 ].
+# cuda_glmnet() keeps the clean, data-independent standard elastic net
+#   lambda_c * [ (1-alpha_c)/2 ||beta||_2^2 + alpha_c ||beta||_1 ]
+# internally and maps the glmnet-convention (lambda, alpha) to
+# (lambda_c, alpha_c) via .cg_glmnet_to_cuda(), so a given (lambda, alpha)
+# reproduces glmnet::glmnet(lambda, alpha). At alpha = 1 the map is the
+# identity, leaving the lasso path bit-identical to earlier versions.
 # Standardisation uses the population (1/n) scale, as glmnet does. Fitting is
 # done on centered/standardised (Xs, ys) with the low-level FISTA solver, then
 # coefficients are mapped back to the original scale.
@@ -122,6 +130,31 @@ NULL
   sort(as.numeric(lambda), decreasing = TRUE)
 }
 
+# Map glmnet-convention (lambda, alpha) to cudaGlmnet's standard elastic net.
+#
+# glmnet solves the Gaussian elastic net on an RMS-standardised response
+# (y/s, s = sqrt(mean(y^2))) and reports lambda / coefficients in raw-y units.
+# In raw-y units that is
+#   lambda_g * [ (1/s)(1-a_g)/2 ||b||^2 + a_g ||b||_1 ],
+# whereas cudaGlmnet's (clean, data-independent) standard objective is
+#   lambda_c * [ (1-a_c)/2 ||b||^2 + a_c ||b||_1 ].
+# Equating the ridge and lasso coefficients gives the exact conversion
+#   a_c       = s*a_g / (1 - a_g + s*a_g)
+#   lambda_c  = lambda_g * (1 - a_g + s*a_g) / s
+# so cuda_glmnet(lambda_g, a_g) reproduces glmnet::glmnet(lambda_g, a_g).
+# Endpoints: a_g = 1 -> (a_c, lambda_c) = (1, lambda_g) (identity, lasso);
+#            a_g = 0 -> (a_c, lambda_c) = (0, lambda_g / s) (pure ridge).
+# A single scalar on lambda cannot work for 0 < a_g < 1, because the ridge and
+# lasso components need different scalings; alpha must be remapped too.
+.cg_glmnet_to_cuda <- function(prep, alpha) {
+  s <- sqrt(mean(prep$ys^2))
+  if (!is.finite(s) || s <= 0) s <- 1  # degenerate response: any scale gives b = 0
+  denom <- 1 - alpha + s * alpha
+  list(alpha_c = s * alpha / denom,
+       lambda_scale = denom / s,
+       s = s)
+}
+
 #' Fit a glmnet-style Gaussian lasso path
 #'
 #' A glmnet-compatible front end over the GPU FISTA solver in \pkg{rcupp}.
@@ -137,27 +170,45 @@ NULL
 #' \code{glmnet::glmnet()} for the Gaussian family.
 #'
 #' @section Numerical notes:
-#' The objective is \code{1/(2n)||y - a0 - X beta||^2 + lambda P(beta)}, where
-#' the penalty is \code{(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1}. Set
-#' \code{alpha = 1} for the lasso, \code{alpha = 0} for pure ridge, or a value
-#' in between for the elastic net. Standardisation uses the population
-#' (\code{1/n}) scale. For \code{alpha = 1} the path is fitted through a single
-#' \pkg{rcupp} lasso session (cold starts, \code{warm_start = FALSE}, stay
-#' bit-identical to a one-shot \code{rcupp::lasso_fista()} solve). For
+#' \code{lambda} and \code{alpha} follow \code{glmnet}'s Gaussian convention.
+#' glmnet fits on an RMS-standardised response (\code{y/s},
+#' \code{s = sqrt(mean(y^2))}) and reports lambda / coefficients in raw-y
+#' units, so its penalty in raw-y units is
+#' \code{lambda[(1/s)(1-alpha)/2 ||beta||_2^2 + alpha ||beta||_1]}. To be
+#' drop-in compatible without baking that data-dependent factor into the
+#' solver, \code{cuda_glmnet()} keeps the standard elastic net
+#' \code{lambda_c[(1-alpha_c)/2 ||beta||_2^2 + alpha_c ||beta||_1]} internally
+#' and maps \code{(lambda, alpha)} to \code{(lambda_c, alpha_c)} via
+#' \code{alpha_c = s*alpha/(1-alpha+s*alpha)} and
+#' \code{lambda_c = lambda*(1-alpha+s*alpha)/s}. A given \code{(lambda, alpha)}
+#' therefore reproduces \code{glmnet::glmnet(lambda, alpha)}. At
+#' \code{alpha = 1} the map is the identity (lasso unchanged); at
+#' \code{alpha = 0} it is \code{lambda_c = lambda/s}. A scalar rescaling of
+#' \code{lambda} alone cannot work for \code{0 < alpha < 1}, because the ridge
+#' and lasso penalties need different scalings.
+#'
+#' Fitting is done on centered/standardised \code{(Xs, ys)} with the population
+#' (\code{1/n}) scale, then coefficients are mapped back to the original scale.
+#' [enet_fista_cpu()] is the pure-R oracle for the \emph{standard} objective;
+#' it must be called with the remapped \code{(lambda_c, alpha_c)} to reproduce a
+#' \code{cuda_glmnet()} fit. For \code{alpha = 1} the path is fitted through a
+#' single \pkg{rcupp} lasso session (cold starts, \code{warm_start = FALSE},
+#' stay bit-identical to a one-shot \code{rcupp::lasso_fista()} solve). For
 #' \code{alpha < 1} it is fitted by a downstream \code{Rcpp} + \pkg{rcupp}
 #' loop over resident device operators, with the design uploaded once. In
 #' both cases \code{warm_start = TRUE} seeds each fit from the previous
-#' solution (fewer iterations, same optimum, not bit-identical). FISTA and
-#' the coordinate descent of glmnet solve the same objective but need not
-#' agree bit-for-bit.
+#' solution (fewer iterations, same optimum, not bit-identical).
 #'
 #' @param x Numeric \code{n x p} design matrix (no missing values).
 #' @param y Numeric response of length \code{n}.
-#' @param lambda Optional numeric vector of penalties (sorted decreasing
-#'   internally). If \code{NULL} (default), a log-spaced path of length
-#'   \code{nlambda} is generated from \code{max(abs(crossprod(X, y)))/n} down to
+#' @param lambda Optional numeric vector of penalties in glmnet's convention
+#'   (sorted decreasing internally). If \code{NULL} (default), a log-spaced
+#'   path of length \code{nlambda} is generated from
+#'   \code{max(abs(crossprod(X, y)))/n} down to
 #'   \code{lambda.max * lambda.min.ratio}. For \code{alpha < 1} the largest
 #'   penalty is divided by \code{alpha} (glmnet-style KKT at \code{beta = 0}).
+#'   The path is returned unchanged (glmnet convention); the internal solve
+#'   uses the remapped values (see \code{Numerical notes}).
 #' @param nlambda Number of lambda values when \code{lambda = NULL}.
 #' @param lambda.min.ratio Smallest lambda as a fraction of the largest.
 #'   Defaults to \code{0.01} when \code{n < p}, else \code{1e-4}
@@ -166,9 +217,11 @@ NULL
 #'   \code{TRUE}).
 #' @param intercept Fit an unpenalised intercept by centering (default
 #'   \code{TRUE}).
-#' @param alpha Elastic-net mixing in \code{[0, 1]}; \code{1} (default) is the
-#'   lasso, \code{0} is pure ridge. The default keeps the lasso path
-#'   bit-identical to earlier versions.
+#' @param alpha Elastic-net mixing in \code{[0, 1]} in glmnet's convention;
+#'   \code{1} (default) is the lasso, \code{0} is pure ridge. The default keeps
+#'   the lasso path bit-identical to earlier versions. See
+#'   \code{Numerical notes} for the (data-dependent) remap applied for
+#'   \code{alpha < 1}.
 #' @param max_iter Maximum FISTA iterations per lambda.
 #' @param tol Relative convergence tolerance.
 #' @param warm_start Logical; seed each lambda fit from the previous solution
@@ -181,7 +234,8 @@ NULL
 #'   \code{a0} (intercepts), \code{lambda}, \code{nzero}, \code{dev.ratio},
 #'   \code{nulldev},
 #'   \code{iterations}, \code{converged}, \code{backend}, \code{nobs},
-#'   \code{nvars}, \code{standardize}, \code{intercept} and \code{call}.
+#'   \code{nvars}, \code{standardize}, \code{intercept}, \code{alpha} (the
+#'   glmnet-convention mixing parameter) and \code{call}.
 #'
 #' @examples
 #' set.seed(1)
@@ -211,6 +265,13 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
                                alpha)
   L <- length(lambda)
 
+  # glmnet-convention (lambda, alpha) -> cuda's standard-objective parameters.
+  # `lambda` stays in glmnet units for the returned object / coef(s=) lookup;
+  # only the internal solve sees the remapped values. At alpha = 1 this is the
+  # identity, so the lasso branch below remains bit-identical to old versions.
+  conv <- .cg_glmnet_to_cuda(prep, alpha)
+  lambda_c <- lambda * conv$lambda_scale
+
   if (alpha == 1) {
     # One lasso session for the whole path: prep$Xs / prep$ys are fixed across
     # all lambda values, so they are uploaded to the device exactly once.
@@ -226,8 +287,11 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
   } else {
     # Elastic net / ridge: a downstream Rcpp + rcupp loop over resident
     # device operators. The rcupp lasso session is lasso-only, so the
-    # algorithm lives here, composed from algorithm-agnostic parts.
-    fits <- .cg_enet_fits(prep, lambda, alpha, max_iter, tol, warm_start)
+    # algorithm lives here, composed from algorithm-agnostic parts. Solve the
+    # standard objective at the remapped (lambda_c, alpha_c) so the fit matches
+    # glmnet at the user-supplied (lambda, alpha).
+    fits <- .cg_enet_fits(prep, lambda_c, conv$alpha_c, max_iter, tol,
+                          warm_start)
   }
   # matrix() keeps beta a p x L matrix even when p == 1 (vapply would collapse).
   beta <- matrix(unlist(lapply(fits, `[[`, "beta"), use.names = FALSE),
@@ -262,6 +326,7 @@ cuda_glmnet <- function(x, y, lambda = NULL, nlambda = 100L,
       nvars      = prep$p,
       standardize = standardize,
       intercept  = intercept,
+      alpha      = alpha,
       call       = match.call()
     ),
     class = "cuda_glmnet"
@@ -371,7 +436,12 @@ cv.cuda_glmnet <- function(x, y, lambda = NULL, nfolds = 10L, foldid = NULL,
       }
       rcupp::session_destroy(sk)
     } else {
-      fk <- .cg_enet_fits(pk, lambda, alpha, max_iter, tol, warm_start)
+      # Each fold re-standardises on its training rows only, so its response
+      # RMS (and hence the glmnet->cuda remap) is fold-specific: compute it from
+      # pk$ys, exactly as glmnet::cv.glmnet() re-standardises per fold.
+      conv_k <- .cg_glmnet_to_cuda(pk, alpha)
+      fk <- .cg_enet_fits(pk, lambda * conv_k$lambda_scale, conv_k$alpha_c,
+                          max_iter, tol, warm_start)
       for (j in seq_len(L)) {
         f <- fk[[j]]
         pred[te, j] <- f$a0 + drop(x[te, , drop = FALSE] %*% f$beta)
@@ -399,6 +469,7 @@ cv.cuda_glmnet <- function(x, y, lambda = NULL, nfolds = 10L, foldid = NULL,
       name        = "Mean-Squared Error",
       fit         = fit,
       nfolds      = nfolds,
+      alpha       = alpha,
       call        = match.call()
     ),
     class = "cv.cuda_glmnet"

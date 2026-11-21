@@ -49,13 +49,39 @@ test_that("registration guards quietly no-op when frameworks are absent", {
 
 test_that("mlr3 learner registration does not error when mlr3 is present", {
   skip_if_not_installed("mlr3")
-  # Structural check only: a full register -> CV -> predict comparison against
-  # a glmnet engine (roadmap section 9) is left to CI with mlr3 installed.
   expect_error(cudaGlmnet:::.register_mlr3_learner(), NA)
 })
 
 test_that("parsnip engine registration does not error when parsnip present", {
   skip_if_not_installed("parsnip")
-  # Structural check only; end-to-end engine behaviour is a CI follow-up.
   expect_error(cudaGlmnet:::.register_parsnip_engine(), NA)
+})
+
+test_that("mlr3 learner trains and predicts end-to-end", {
+  skip_if_not_installed("mlr3")
+  cudaGlmnet:::.register_mlr3_learner()
+  d <- make_lasso_data(n = 120L, p = 5L, seed = 21L)
+  df <- data.frame(y = d$y, X = d$X)
+  task <- mlr3::as_task_regr(df, target = "y")
+  learner <- mlr3::lrn("regr.cuda_glmnet")
+  learner$train(task)
+  pred <- learner$predict(task)
+  expect_s3_class(pred, "PredictionRegr")
+  expect_length(pred$response, nrow(d$X))
+  expect_true(all(is.finite(pred$response)))
+})
+
+test_that("parsnip engine fits and predicts end-to-end", {
+  skip_if_not_installed("parsnip")
+  cudaGlmnet:::.register_parsnip_engine()
+  d <- make_lasso_data(n = 120L, p = 5L, seed = 22L)
+  X <- d$X
+  colnames(X) <- paste0("V", seq_len(ncol(X)))
+  spec <- cuda_enet(mode = "regression", engine = "cuda_glmnet")
+  fit <- parsnip::fit_xy(spec, x = X, y = d$y)
+  p <- predict(fit, new_data = X[1:5, , drop = FALSE])
+  expect_s3_class(p, "data.frame")
+  expect_true(".pred" %in% names(p))
+  expect_equal(nrow(p), 5L)
+  expect_true(all(is.finite(p$.pred)))
 })

@@ -30,14 +30,18 @@ make_data <- function(n, p) {
   list(X = X, y = drop(X %*% beta) + rnorm(n, sd = 0.5))
 }
 
-# Standardize once on the host (column population variance 1, y centred) so
-# GPU, pure-R oracle and closed form solve the IDENTICAL problem with
-# standardize = FALSE, intercept = FALSE.
+# Standardize once on the host (column population variance 1, y centred AND
+# scaled to unit RMS) so GPU, pure-R oracle and closed form solve the IDENTICAL
+# problem with standardize = FALSE, intercept = FALSE. Scaling y to unit RMS
+# makes s = sqrt(mean(y^2)) = 1, so cudaGlmnet's glmnet-convention lambda equals
+# the standard-objective lambda used by the oracle / closed form (the remap is
+# the identity at every alpha).
 std_data <- function(d) {
   Xc <- d$X - matrix(colMeans(d$X), nrow(d$X), ncol(d$X), byrow = TRUE)
   xs <- sqrt(colMeans(Xc^2))
+  yc <- d$y - mean(d$y)
   list(X = Xc / matrix(xs, nrow(Xc), ncol(Xc), byrow = TRUE),
-       y = d$y - mean(d$y))
+       y = yc / sqrt(mean(yc^2)))
 }
 
 time_median <- function(f, reps = 3L) {
@@ -77,11 +81,15 @@ not a drop-in replacement for `glmnet`'s ridge path.
 ## Method
 
 - One synthetic dataset per configuration, `n x p`, with five planted nonzero
-  coefficients and Gaussian noise. Data are standardized on the host as above,
+  coefficients and Gaussian noise. Data are standardized on the host as above
+  (columns to unit population variance, `y` centred **and scaled to unit RMS**),
   so `cuda_glmnet()`, `enet_fista_cpu()` and the closed form all solve the same
-  problem with `standardize = FALSE, intercept = FALSE`. `glmnet` receives the
-  raw data with its own default `standardize = TRUE` (equivalent on this
-  scale) and **default convergence** -- no deprecated `thresh`.
+  problem with `standardize = FALSE, intercept = FALSE`. Unit-RMS `y` makes
+  `s = sqrt(mean(y^2)) = 1`, so the glmnet-convention `lambda` passed to
+  `cuda_glmnet()` equals the standard-objective `lambda` the oracle and closed
+  form use (the lambda/alpha remap is the identity). `glmnet` receives the
+  raw data with its own default `standardize = TRUE` (equivalent on this scale)
+  and **default convergence** -- no deprecated `thresh`.
 - A shared 30-value log-spaced grid from `lambda.max` down to
   `0.01 * lambda.max`. A log-spaced path spends most of its grid at small
   lambda, the expensive end for an iterative solver, so whole-path timings

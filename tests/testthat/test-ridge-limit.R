@@ -7,10 +7,14 @@ test_that("alpha = 0 gives non-zero ridge coefficients", {
   expect_gt(sum(abs(fit$beta[, 1L]) > 1e-10), 3L)
 })
 
-test_that("pure-ridge fit reproduces the ridge oracle", {
+test_that("pure-ridge fit reproduces the ridge oracle at the remapped lambda", {
   lam <- 0.05
   fit <- cuda_glmnet(d$X, d$y, lambda = lam, alpha = 0)
-  ref <- enet_fista_cpu(prep$Xs, prep$ys, lam, alpha = 0)
+  conv <- cudaGlmnet:::.cg_glmnet_to_cuda(prep, 0)
+  # alpha = 0 remap is lambda_c = lambda / s, alpha_c = 0.
+  expect_equal(conv$alpha_c, 0)
+  ref <- enet_fista_cpu(prep$Xs, prep$ys, lam * conv$lambda_scale,
+                        alpha = conv$alpha_c)
   expect_equal(as.numeric(fit$beta[, 1L]),
                ref$coefficients / prep$xs, tolerance = 1e-8)
 })

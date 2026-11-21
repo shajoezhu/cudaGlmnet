@@ -1,4 +1,48 @@
+# cudaGlmnet 0.0.0.9015
+
+* **Breaking numerical contract change (alpha < 1):** `cuda_glmnet()` and
+  `cv.cuda_glmnet()` now take `lambda` / `alpha` in `glmnet`'s Gaussian
+  convention. A given `(lambda, alpha)` now reproduces
+  `glmnet::glmnet(lambda, alpha)` (verified to ~1e-6 with default solver
+  tolerances, ~1e-8 at tight convergence), whereas previously the two differed
+  because glmnet scales the response by its RMS `s = sqrt(mean(y^2))`.
+  Internally the solver keeps its clean, data-independent standard elastic net
+  `lambda_c[(1-alpha_c)/2 ||beta||^2 + alpha_c ||beta||_1]` and maps
+  `alpha_c = s*alpha/(1-alpha+s*alpha)`,
+  `lambda_c = lambda*(1-alpha+s*alpha)/s`. A scalar rescaling of `lambda`
+  alone is impossible for `0 < alpha < 1` because the ridge and lasso penalties
+  need different scalings; `alpha` must be remapped too. At `alpha = 1` the map
+  is the identity, so the lasso path stays bit-identical to earlier versions.
+  The returned `lambda` remains in glmnet units (for `coef(s=)` lookup) and
+  fits now also carry `alpha`; CV applies the remap per fold, matching
+  `cv.glmnet()`'s per-fold re-standardisation.
+
+* Added the exact derivation and validation as reproducible diagnostics in
+  `benchmark/`: `diagnose_glmnet_lambda.R` (KKT shape fit),
+  `diagnose_glmnet_scale.R` (identifies `s = sqrt(mean(y^2))`, not `sd(y)`),
+  `validate_lambda_remap.R` (end-to-end remap, ~1e-8 at all alpha).
+  `tests/testthat/test-glmnet-parity.R` now asserts glmnet agreement directly;
+  oracle-based tests call the pure-R oracle at the remapped parameters.
+
 # cudaGlmnet 0.0.0.9014
+
+* Fix the optional P2 framework engines for real `mlr3` 1.8.0 / parsnip 1.6.1
+  and verify them end-to-end (register -> fit -> predict), superseding the
+  structural-only note in 0.0.0.9013. The `mlr3` learner's `.train` /
+  `.predict` are now **private** R6 methods (mlr3 dispatches them via
+  `get_private()`; as public methods registration succeeds but `train()`
+  fails with "attempt to apply non-function"). The parsnip engine is ported
+  to the >= 1.x `value=` / `options=` API of `set_fit` / `set_pred` /
+  `set_encoding` (the old `func=` / `defaults=` / `args=` form failed
+  silently); registration is now idempotent across repeated loads. A
+  `cuda_enet()` model-spec constructor is exported, and `engines.Rmd` plus
+  `tests/testthat/test-engines.R` now exercise all three frameworks live.
+
+* Record the honest section 9 P2 result in the `engines` vignette: the
+  functional half (register -> CV -> predict) is met for mlr3, but the speed
+  half is **not** — single-fit GPU wall times (2.75-11.82 s) are ~100x slower
+  than the `glmnet` engine (0.02-0.09 s) on the measured scales.
+  `cudaGlmnet`'s advantage is on repeated-fit workloads, not one-off fits.
 
 * Development version bumped from 0.0.0.9013.
 

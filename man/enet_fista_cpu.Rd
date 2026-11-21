@@ -32,7 +32,17 @@ the numerical contract of \code{src/enet_path.cpp} and shares the same
 Lipschitz constant via \code{.cg_lipschitz()}, so it can validate the
 compiled path to tight tolerance.
 }
-\details{
+\section{Relation to glmnet}{
+
+This oracle solves the \emph{standard} objective shown below, which is the
+objective \code{cuda_glmnet()} uses internally. \code{cuda_glmnet()} takes
+\code{lambda} / \code{alpha} in \code{glmnet}'s convention and remaps them to
+the standard objective before solving (see the \code{Numerical notes} of
+\code{\link{cuda_glmnet}}). To reproduce a \code{cuda_glmnet(lambda, alpha)}
+fit with this oracle, pass the remapped \code{(lambda_c, alpha_c)}; calling
+it with the raw \code{(lambda, alpha)} reproduces the old (pre-remap)
+behaviour, not the current fit.
+
 The objective is
 \code{1/(2n)||y - Xb||^2 + lambda[(1-alpha)/2 ||b||_2^2 + alpha ||b||_1]}.
 With \code{alpha = 1} it reduces to the lasso of \code{\link[=lasso_fista_cpu]{lasso_fista_cpu()}}; with
@@ -41,3 +51,4 @@ With \code{alpha = 1} it reduces to the lasso of \code{\link[=lasso_fista_cpu]{l
 \code{soft_threshold(u, thresh*alpha) / (1 + thresh*(1-alpha))} where
 \code{thresh = lambda/L}.
 }
+

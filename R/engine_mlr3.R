@@ -2,8 +2,10 @@
 # mlr3 learner registration (optional). mlr3 is a Suggests dependency only;
 # the registration is attempted from .onLoad when its namespace is present,
 # and each attempt is wrapped in tryCatch so version / API drift never keeps
-# the package from loading. This code is structurally validated only; mlr3 is
-# not installed locally, so it has not been exercised end-to-end.
+# the package from loading.
+# .train / .predict MUST be private methods: mlr3 dispatches them via
+# get_private(learner)$.train(task), so defining them as public methods lets
+# registration succeed but makes train() fail with "non-function".
 # R6 injects self / super into methods at runtime; declare them so static
 # checks do not mistake them for undefined globals.
 # ---------------------------------------------------------------------------
@@ -29,7 +31,9 @@ utils::globalVariables(c("self", "super"))
             label = "GPU Gaussian Lasso / Elastic Net",
             man = "cudaGlmnet::cuda_glmnet"
           )
-        },
+        }
+      ),
+      private = list(
         .train = function(task) {
           x <- as.matrix(task$data(cols = task$feature_names))
           y <- as.numeric(task$truth())

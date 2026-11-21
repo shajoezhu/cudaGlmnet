@@ -30,7 +30,8 @@ through three modelling frameworks. Every framework is an optional
 `Suggests` dependency: nothing is a hard `Imports`, and each registration is
 attempted from `.onLoad` behind a `requireNamespace` guard plus `tryCatch`,
 so a missing framework (or a version whose extension API has drifted) never
-stops the package from loading.
+stops the package from loading. The live chunks below run only when the
+corresponding framework is installed.
 
 ## Shared limitations
 
@@ -42,7 +43,7 @@ stops the package from loading.
 - The solver returns a whole lambda path, so a single-number prediction must
   pick one penalty. The adapters predict at the smallest fitted lambda (the
   least-regularised end of the path) by default; `s` can override this in
-  `SL.cudaGlmnet()`.
+  `SL.cudaGlmnet()`. There are no tunable parsnip model arguments yet.
 
 ## SuperLearner
 
@@ -77,11 +78,16 @@ predict(sl, newdata = as.data.frame(X[1:5, ]))$pred
 
 When `mlr3` is installed, `.onLoad` registers an R6 class inheriting
 `mlr3::LearnerRegr` under the key `regr.cuda_glmnet`, whose `.train` calls
-`cuda_glmnet()` and whose `.predict` calls `predict()`. No change to mlr3 is
+`cuda_glmnet()` and whose `.predict` calls `predict()`. mlr3 dispatches these
+as **private** R6 methods (`get_private(learner)$.train(task)`), so they are
+defined in the class `private` list rather than `public`. No change to mlr3 is
 needed; registration happens inside the downstream package.
 
 ```{r mlr3-usage, eval = RUN_MLR3}
 library(mlr3)
+set.seed(1)
+X <- matrix(rnorm(200 * 5), 200, 5)
+Y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(200, sd = 0.5)
 task <- as_task_regr(data.frame(y = Y, X), target = "y")
 learner <- lrn("regr.cuda_glmnet")
 learner$train(task)
@@ -92,30 +98,64 @@ learner$predict(task)
 
 When `parsnip` is installed, `.onLoad` registers a `cuda_glmnet` engine via
 `set_new_model()` / `set_model_mode()` / `set_model_engine()` /
-`set_dependency()` / `set_fit()` / `set_pred()`. The parsnip model type is
-named `cuda_enet` on purpose: creating a model-spec function called
-`cuda_glmnet()` could otherwise shadow this package's own solver.
+`set_dependency()` / `set_encoding()` / `set_fit()` / `set_pred()`, using the
+parsnip >= 1.x `value=` / `options=` API. The model type is named `cuda_enet`
+on purpose: creating a model-spec function called `cuda_glmnet()` could
+otherwise shadow this package's own solver. `cuda_enet()` is the shipped
+constructor for that model specification.
+
+The engine declares a **matrix** interface, so `fit_xy()` is the natural
+entry point (the predictor matrix must have column names, a parsnip
+requirement). The formula `fit()` path also works.
 
 ```{r parsnip-usage, eval = RUN_PARSNIP}
 library(parsnip)
-model <- cuda_enet(mode = "regression", engine = "cuda_glmnet")
+set.seed(1)
+X <- matrix(rnorm(200 * 5), 200, 5,
+            dimnames = list(NULL, paste0("V", 1:5)))
+Y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(200, sd = 0.5)
+spec <- cuda_enet(mode = "regression", engine = "cuda_glmnet")
+fit <- fit_xy(spec, x = X, y = Y)
+head(predict(fit, new_data = X[1:5, , drop = FALSE]))
 ```
 
-## Verification status and open work
+## Verification status
 
-None of `mlr3`, `parsnip`, `tidymodels`, `SuperLearner` or `mlr3misc` is
-installed on the machine that produced this vignette. Consequently:
+All three frameworks (`SuperLearner`, `mlr3`, `parsnip`) are installed on the
+machine that produced this vignette, so the chunks above run live:
 
-- The SuperLearner-style `SL.cudaGlmnet()` fit-to-predict path **is** verified
-  locally, by `tests/testthat/test-engines.R` (it needs no SuperLearner
-  install).
-- The `mlr3` and `parsnip` registration code has been checked only
-  **structurally**: the guards are correct, the constructors have the expected
-  signatures, and `.onLoad` does not hard-fail. It has **not** been verified
-  end-to-end against the real frameworks.
-- The roadmap (section 9) acceptance criterion — at least one framework
-  running register -> CV -> predict and beating that framework's `glmnet`
-  engine — is therefore **not yet met** on this machine.
+- The SuperLearner-style `SL.cudaGlmnet()` fit-to-predict path is verified by
+  `tests/testthat/test-engines.R` (it needs no SuperLearner install) and by
+  the live `sl-usage` chunk.
+- The `mlr3` path is verified end-to-end: register -> train -> predict ->
+  3-fold CV. The `.train` / `.predict` private-method requirement was found
+  and fixed against real mlr3; a public-method definition registers but then
+  fails at `train()` with "attempt to apply non-function".
+- The `parsnip` path is verified end-to-end (register -> `fit_xy` / `fit` ->
+  `predict`) against parsnip 1.6.1. That version replaced the 0.x
+  `func=` / `defaults=` / `args=` registration with `value=` / `options=`;
+  the engine was ported accordingly. On a 200 x 5 planted-signal problem the
+  fitted predictions correlate with the response at ~0.97.
 
-CI that installs these frameworks should finish that end-to-end check and
-add real `skip_if_not_installed()` regression tests for each engine.
+The roadmap (section 9) acceptance criterion has **two** halves: (1) at least
+one framework runs register -> CV -> predict, and (2) it is faster than that
+framework's `glmnet` engine. Half (1) is now met for mlr3. Half (2) is
+**not** met: on single-fit tasks the GPU drop-in learner is much slower than
+the `glmnet` engine, because it pays a fixed device setup cost that is only
+recovered over a whole lambda path / many repeated fits. The measured
+single-fit wall times (CUDA device, `n x p` Gaussian designs, median of 3)
+were:
+
+| scale | cuda_glmnet (s) | glmnet (s) | glmnet / cuda |
+|-------|-----------------|------------|---------------|
+| n = 200, p = 40   | 2.750  | 0.023 | 0.01x |
+| n = 500, p = 200  | 4.648  | 0.039 | 0.01x |
+| n = 300, p = 2000 | 11.818 | 0.085 | 0.01x |
+
+These are a snapshot, not a guarantee. `cudaGlmnet`'s demonstrated advantage
+is on **repeated-fit** workloads (whole lambda paths, CV folds, bootstrap
+resamples, resident subset refits), not on one-off single fits — see the
+`ridge-benchmark`, `bio-flagship-benchmark` and `subset-residency` vignettes.
+The framework adapters exist so those workloads can be reached from mlr3 /
+tidymodels / SuperLearner; they are not a claim that a single `fit()` call
+beats `glmnet`.
