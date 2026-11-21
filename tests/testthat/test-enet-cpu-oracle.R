@@ -4,7 +4,7 @@ prep <- cudaGlmnet:::.cg_prep(d$X, d$y, TRUE, TRUE)
 # cuda_glmnet() takes glmnet-convention (lambda, alpha) and maps them to the
 # standard objective that enet_fista_cpu() solves. The oracle must therefore be
 # called with the remapped (lambda_c, alpha_c) to be comparable.
-test_that("compiled elastic-net path matches the pure-R oracle at the remapped parameters", {
+test_that("elastic-net path matches pure-R oracle at remapped parameters", {
   lam <- 0.05
   for (a in c(0.75, 0.5, 0.25)) {
     fit <- cuda_glmnet(d$X, d$y, lambda = lam, alpha = a)
@@ -32,7 +32,7 @@ test_that("elastic-net lambda path matches the oracle at every lambda", {
   }
 })
 
-test_that("an explicit lambda is returned unchanged in glmnet convention for alpha < 1", {
+test_that("explicit lambda is unchanged in glmnet convention, alpha < 1", {
   lam <- c(0.3, 0.2, 0.1)
   fit <- cuda_glmnet(d$X, d$y, lambda = lam, alpha = 0.3)
   expect_equal(fit$lambda, lam)

@@ -14,5 +14,11 @@
     tryCatch(.register_parsnip_engine(),
              error = function(e) invisible(FALSE))
   }
+  # Part B: mlr3 subset-ridge learner (needs rcupp::ctx_create(); guarded
+  # internally so an older rcupp degrades gracefully).
+  if (requireNamespace("mlr3", quietly = TRUE)) {
+    tryCatch(.register_mlr3_subset_learner(),
+             error = function(e) invisible(FALSE))
+  }
   invisible(NULL)
 }

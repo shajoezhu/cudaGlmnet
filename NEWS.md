@@ -1,5 +1,20 @@
 # cudaGlmnet 0.0.0.9015
 
+* **Part B / §9 half (2), qualified**: add an mlr3 learner
+  `regr.cuda_subset_ridge` (`R/engine_mlr3_subsets.R`) plus internal
+  `ctx_resident_subsets_cpp()` (`src/ctx_resident.cpp`). The learner holds ONE
+  persistent `rcupp::ctx_create()` device context across B subsets and across
+  CV folds, amortising device setup on the `p >> m` repeated subset-ridge
+  workload. On that workload (real CUDA, fair primary comparator = exact CPU
+  Cholesky, machine precision) the GPU dual route is 22x–333x faster; vs the
+  framework `glmnet` engine ~9x–44x but flagged `glmnet_comparable = FALSE`
+  (unequal optimum). This meets §9 half (2) **for repeated closed-form subset
+  ridge only** and does NOT reverse the lasso-path result (GPU still loses to
+  glmnet Fortran CD). See the `framework-subset-ridge` vignette and
+  `benchmark/results/framework_subset_ridge.csv`. No new `rcupp` C ABI symbol;
+  `rcupp_ctx_abi()` stays 1. Needs the Part A rcupp (`ctx_create()`); runtime
+  guarded so an older rcupp degrades gracefully.
+
 * **Breaking numerical contract change (alpha < 1):** `cuda_glmnet()` and
   `cv.cuda_glmnet()` now take `lambda` / `alpha` in `glmnet`'s Gaussian
   convention. A given `(lambda, alpha)` now reproduces

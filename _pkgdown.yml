@@ -43,6 +43,7 @@ articles:
   - ridge-benchmark
   - bio-flagship-benchmark
   - subset-residency
+  - framework-subset-ridge
 - title: Background
   contents:
   - gpu-lasso-comparison

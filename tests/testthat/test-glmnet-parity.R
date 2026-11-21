@@ -11,9 +11,11 @@ test_that("cuda_glmnet matches glmnet at glmnet-convention (lambda, alpha)", {
     g <- glmnet::glmnet(d$X, d$y, lambda = lam, alpha = a,
                         control = list(thresh = 1e-13))
     d_beta <- max(abs(drop(fit$beta) - drop(as.matrix(g$beta))))
-    expect_true(d_beta < 1e-5, info = sprintf("alpha = %.2f coefficients: %g", a, d_beta))
+    expect_true(d_beta < 1e-5,
+                info = sprintf("alpha = %.2f coefficients: %g", a, d_beta))
     d_a0 <- max(abs(fit$a0 - as.numeric(coef(g)[1L])))
-    expect_true(d_a0 < 1e-4, info = sprintf("alpha = %.2f intercept: %g", a, d_a0))
+    expect_true(d_a0 < 1e-4,
+                info = sprintf("alpha = %.2f intercept: %g", a, d_a0))
   }
 })
 

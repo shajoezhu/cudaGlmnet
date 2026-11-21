@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include "subset_solve_shared.h"   /* need_buf / solve_subset (shared with ctx_resident.cpp) */
 
 /*
  * cudaGlmnet Stage 2B / low-level capability: a DOWNSTREAM composition that
@@ -54,51 +55,10 @@ struct CtxGuard {
   CtxGuard& operator=(const CtxGuard&) = delete;
 };
 
-// Buffers are owned by the ctx; rcupp_ctx_destroy frees them all. Guard the
-// one genuinely fallible creation path.
-inline rcupp_buf need_buf(rcupp_ctx c, int n) {
-  rcupp_buf b = rcupp_buf_alloc(c, n);
-  if (!b) Rcpp::stop("rcupp: buffer allocation failed");
-  return b;
-}
-
-// Solve one subset from resident Xs (m x p), ys (m), for BOTH routes.
-//   use_dual=false (primal): sys dim sd=p, diagonal p x p, Gram Xs^T Xs.
-//   use_dual=true  (dual):   sys dim sd=m, diagonal m x m, Gram Xs Xs^T.
-// `diag` = m*lambda*I_sd (uploaded once) -> `work`; Gram accumulated into the
-// lower triangle; potrf/potrs solve from the Cholesky factor; beta[p] is
-// downloaded last. Returns 0 on success, LAPACK info (>0, not SPD) or a small
-// error code.
-inline int solve_subset(rcupp_ctx c, int m, int p, bool use_dual,
-                        rcupp_buf Xs, rcupp_buf ys,
-                        rcupp_buf diag, rcupp_buf work, rcupp_buf rhs,
-                        rcupp_buf out, double* beta_out) {
-  const int sd = use_dual ? m : p;
-  rcupp_d_copy(c, sd * sd, diag, work);            // work = m*lambda*I_sd
-  if (use_dual) {
-    // work(m x m) += Xs Xs^T : A=Xs (m x p, lda=m, OP_N), B=Xs (m x p
-    // stored, ldb=m, OP_T -> p x m). beta=1 accumulates into work.
-    // BLAS alpha/beta here are scalars (1,1), NOT the elastic-net mixing alpha.
-    rcupp_d_gemm(c, RCUPP_OP_N, RCUPP_OP_T, m, m, p,
-                 1.0, Xs, m, Xs, m, 1.0, work, m);
-    rcupp_d_copy(c, m, ys, rhs);                    // RHS = ys (m)
-  } else {
-    rcupp_d_syrk(c, Xs, m, p, RCUPP_FILL_LOWER, 1.0, 1.0, work);  // += Xs^T Xs
-    rcupp_d_gemv_t(c, Xs, m, p, ys, rhs);          // RHS = Xs^T ys (p)
-  }
-  int info = 0;
-  if (rcupp_d_potrf(c, RCUPP_FILL_LOWER, sd, work, sd, &info) != 0) return 2;
-  if (info != 0) return info;                      // not positive definite
-  if (rcupp_d_potrs(c, RCUPP_FILL_LOWER, sd, 1, work, sd, rhs, sd, &info) != 0)
-    return 3;
-  if (use_dual) {
-    rcupp_d_gemv_t(c, Xs, m, p, rhs, out);         // beta = Xs^T alpha (p)
-    rcupp_buf_download(c, out, beta_out, p);
-  } else {
-    rcupp_buf_download(c, rhs, beta_out, p);       // rhs (p) IS beta
-  }
-  return info;                                     // 0 = ok
-}
+// need_buf / solve_subset now live in subset_solve_shared.h (namespace
+// cgsubset), shared with ctx_resident.cpp. Import them into this TU.
+using cgsubset::need_buf;
+using cgsubset::solve_subset;
 
 }  // namespace
 

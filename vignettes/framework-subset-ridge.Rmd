@@ -1,0 +1,98 @@
+---
+title: "Framework subset-ridge: §9 half (2) evidence"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Framework subset-ridge: section 9 half (2) evidence}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+```
+
+## What this proves — and what it does not
+
+Roadmap §9 hard gate half (2) asks for a framework adapter that is *faster
+than the same framework's `glmnet` engine*. On the **lasso path** the GPU
+adapter **loses** to glmnet's Fortran coordinate descent (`0.002x–0.059x` in
+`benchmark/results/fair_comparison.csv`): a single small dense fit cannot
+amortise fixed device setup. That result is unchanged here.
+
+This vignette covers the **other workload the roadmap explicitly permits**
+("换 workload"): the `p >> m` **repeated subset-ridge** problem. The new mlr3
+learner `regr.cuda_subset_ridge` fits closed-form ridge on `B` row-subsets of
+one resident `n x p` panel via the dual/Woodbury route, holding **one
+persistent `rcupp` device context** (an XPtr from `rcupp::ctx_create()`)
+across all subsets and all folds. This is the "same fit repeated many times"
++ `p >> n` shape.
+
+The honest comparator is the **exact CPU Cholesky solve** (best plain-R
+implementation), to which both sides agree at machine precision. The
+framework's `glmnet` engine is reported as a **secondary reference only** and
+flagged non-comparable, because `glmnet(alpha = 0)` coordinate descent does
+**not** reach the closed-form optimum in `p >> m` ridge.
+
+## The persistent context (Part A + Part B)
+
+`rcupp::ctx_create()` returns an external pointer of class `rcupp_ctx` holding
+one generic device context — a cuBLAS handle and a buffer registry, with NO
+algorithm. The learner keeps it in a private field and reuses it across
+`train()` calls, amortising `cublasCreate` / `cudaMalloc`. The subset solve is
+a downstream composition in `cudaGlmnet` (`cuda_ctx_subset_ridge()` →
+`ctx_resident_subsets_cpp()`), using only the generic `rcupp` C ABI; `rcupp`
+itself still knows nothing about ridge, CV or reference panels and
+`rcupp_ctx_abi()` stays `1`.
+
+```{r ctx-smoke}
+ctx <- rcupp::ctx_create()
+cat("ctx class:", class(ctx), " abi:", rcupp::ctx_abi(), "\n")
+rcupp::ctx_destroy(ctx)
+cat("destroyed (idempotent)\n")
+```
+
+## Measured §9 half (2) result (snapshot)
+
+Real CUDA run (`cudaGlmnet 0.0.0.9015`, `rcupp 0.1.4`, `glmnet 5.2`,
+`lambda = 0.2`, `K`/`B` subsets as shown). `speedup` is GPU resident over the
+comparator. Reproduce with `Rscript benchmark/framework_subset_ridge.R`.
+Timing has a ±10–20% spread; read the trend, not the decimals.
+
+```{r table, echo = FALSE}
+res <- data.frame(
+  p    = c(1000L, 1000L, 2000L, 4000L),
+  n    = c(300L, 300L, 300L, 300L),
+  m    = c(150L, 150L, 150L, 150L),
+  B    = c(8L, 30L, 8L, 4L),
+  method = rep("dual", 4L),
+  t_gpu  = c(0.015, 0.174, 0.083, 0.083),
+  t_exact = c(1.015, 3.826, 7.449, 27.638),
+  t_glmnet = c(0.439, 1.591, 1.893, 3.613),
+  vs_exact = c(67.7, 22.0, 89.7, 333.0),
+  vs_glmnet = c(29.3, 9.1, 22.8, 43.5)
+)
+res
+```
+
+- **Primary (fair): GPU dual is 22x–333x faster than the exact CPU Cholesky
+  solve**, with `max |Δbeta| = 4.36e-15` — both at machine precision. This is
+  a real, reproducible property of the resident dual composition.
+- **Secondary (unequal optimum): GPU is ~9x–44x faster than the framework's
+  `glmnet` engine**, but `glmnet_comparable = FALSE`: its coordinate descent
+  stops at `max |Δbeta| ~ 1e-2` from the closed form, so the two are solving to
+  different tolerances. This number is a reference, **not** the headline.
+
+## Honest scope
+
+- This satisfies §9 half (2) **for the repeated closed-form subset-ridge
+  workload only**. It does **not** reverse the lasso-path result, where the
+  GPU adapter still loses to glmnet Fortran CD; see
+  `benchmark/results/fair_comparison.csv`.
+- This is not a generic "faster than glmnet" drop-in claim. It is the
+  `p >> m`, many-subset, one-resident-panel regime — exactly the workload the
+  bio product line targets.
+- CPU fallback runs the same API with native host arithmetic; the reported
+  speedups are CUDA-backend numbers only.
+
+See `?rcupp::ctx_create` and `?cuda_resident_subsets` for the underlying APIs.

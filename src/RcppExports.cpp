@@ -10,6 +10,23 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
+// ctx_resident_subsets_cpp
+Rcpp::List ctx_resident_subsets_cpp(SEXP ctx, Rcpp::NumericMatrix x, Rcpp::NumericVector y, Rcpp::List idx_list, double lambda, std::string strategy, std::string method);
+RcppExport SEXP _cudaGlmnet_ctx_resident_subsets_cpp(SEXP ctxSEXP, SEXP xSEXP, SEXP ySEXP, SEXP idx_listSEXP, SEXP lambdaSEXP, SEXP strategySEXP, SEXP methodSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type ctx(ctxSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type x(xSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type y(ySEXP);
+    Rcpp::traits::input_parameter< Rcpp::List >::type idx_list(idx_listSEXP);
+    Rcpp::traits::input_parameter< double >::type lambda(lambdaSEXP);
+    Rcpp::traits::input_parameter< std::string >::type strategy(strategySEXP);
+    Rcpp::traits::input_parameter< std::string >::type method(methodSEXP);
+    rcpp_result_gen = Rcpp::wrap(ctx_resident_subsets_cpp(ctx, x, y, idx_list, lambda, strategy, method));
+    return rcpp_result_gen;
+END_RCPP
+}
 // enet_path_cpp
 Rcpp::List enet_path_cpp(Rcpp::NumericMatrix Xs, Rcpp::NumericVector ys, Rcpp::NumericVector lambda, double alpha, double L, bool warm_start, int max_iter, double tol);
 RcppExport SEXP _cudaGlmnet_enet_path_cpp(SEXP XsSEXP, SEXP ysSEXP, SEXP lambdaSEXP, SEXP alphaSEXP, SEXP LSEXP, SEXP warm_startSEXP, SEXP max_iterSEXP, SEXP tolSEXP) {
@@ -46,6 +63,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
+    {"_cudaGlmnet_ctx_resident_subsets_cpp", (DL_FUNC) &_cudaGlmnet_ctx_resident_subsets_cpp, 7},
     {"_cudaGlmnet_enet_path_cpp", (DL_FUNC) &_cudaGlmnet_enet_path_cpp, 8},
     {"_cudaGlmnet_resident_subsets_cpp", (DL_FUNC) &_cudaGlmnet_resident_subsets_cpp, 6},
     {NULL, NULL, 0}

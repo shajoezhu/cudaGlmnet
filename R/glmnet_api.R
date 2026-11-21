@@ -138,9 +138,8 @@ NULL
 #   lambda_g * [ (1/s)(1-a_g)/2 ||b||^2 + a_g ||b||_1 ],
 # whereas cudaGlmnet's (clean, data-independent) standard objective is
 #   lambda_c * [ (1-a_c)/2 ||b||^2 + a_c ||b||_1 ].
-# Equating the ridge and lasso coefficients gives the exact conversion
-#   a_c       = s*a_g / (1 - a_g + s*a_g)
-#   lambda_c  = lambda_g * (1 - a_g + s*a_g) / s
+# Equating the ridge and lasso coefficients gives the exact conversion: a_c is
+# s*a_g / (1 - a_g + s*a_g), and lambda_c is lambda_g * (1 - a_g + s*a_g) / s,
 # so cuda_glmnet(lambda_g, a_g) reproduces glmnet::glmnet(lambda_g, a_g).
 # Endpoints: a_g = 1 -> (a_c, lambda_c) = (1, lambda_g) (identity, lasso);
 #            a_g = 0 -> (a_c, lambda_c) = (0, lambda_g / s) (pure ridge).
@@ -148,7 +147,8 @@ NULL
 # lasso components need different scalings; alpha must be remapped too.
 .cg_glmnet_to_cuda <- function(prep, alpha) {
   s <- sqrt(mean(prep$ys^2))
-  if (!is.finite(s) || s <= 0) s <- 1  # degenerate response: any scale gives b = 0
+  # Degenerate response: any scale gives b = 0.
+  if (!is.finite(s) || s <= 0) s <- 1
   denom <- 1 - alpha + s * alpha
   list(alpha_c = s * alpha / denom,
        lambda_scale = denom / s,
