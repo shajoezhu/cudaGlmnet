@@ -1,0 +1,121 @@
+---
+title: "Framework engines: SuperLearner, mlr3 and parsnip"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Framework engines: SuperLearner, mlr3 and parsnip}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaGlmnet)
+HAS_SL <- requireNamespace("SuperLearner", quietly = TRUE)
+HAS_MLR3 <- requireNamespace("mlr3", quietly = TRUE)
+HAS_PARSNIP <- requireNamespace("parsnip", quietly = TRUE)
+RUN_SL <- HAS_SL
+RUN_MLR3 <- HAS_MLR3
+RUN_PARSNIP <- HAS_PARSNIP
+```
+
+```{r status, echo = FALSE}
+if (!any(c(RUN_SL, RUN_MLR3, RUN_PARSNIP))) {
+  cat("Live framework demos skipped: SuperLearner / mlr3 / parsnip not ",
+      "installed.\n")
+}
+```
+
+`cudaGlmnet` ships thin adapters that expose its GPU Gaussian lasso solver
+through three modelling frameworks. Every framework is an optional
+`Suggests` dependency: nothing is a hard `Imports`, and each registration is
+attempted from `.onLoad` behind a `requireNamespace` guard plus `tryCatch`,
+so a missing framework (or a version whose extension API has drifted) never
+stops the package from loading.
+
+## Shared limitations
+
+- `cuda_glmnet()` supports only the **Gaussian** family. Adapters reject a
+  non-Gaussian `family` with a clear error; binomial and sparse `x` are
+  future work, not silently pretended.
+- The `obsWeights` and `id` arguments passed by SuperLearner are currently
+  **ignored, not yet supported**.
+- The solver returns a whole lambda path, so a single-number prediction must
+  pick one penalty. The adapters predict at the smallest fitted lambda (the
+  least-regularised end of the path) by default; `s` can override this in
+  `SL.cudaGlmnet()`.
+
+## SuperLearner
+
+`SL.cudaGlmnet()` follows the `SL.*` naming convention. It fits with
+`cuda_glmnet()` and returns `list(pred = <numeric>, fit = <object>)`; the
+companion `predict.SL.cudaGlmnet()` method predicts from the stored `fit`.
+SuperLearner discovers the function by name at run time. The wrapper is an
+ordinary R function, so it can also be called directly without SuperLearner
+installed — this is the path exercised by the package unit tests.
+
+```{r sl-direct, eval = FALSE}
+set.seed(1)
+X <- matrix(rnorm(60 * 5), 60, 5)
+Y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(60, sd = 0.5)
+out <- SL.cudaGlmnet(Y, X, X, family = gaussian(), nlambda = 10)
+length(out$pred)
+```
+
+With SuperLearner present, the same function is used as a library learner:
+
+```{r sl-usage, eval = RUN_SL}
+library(SuperLearner)
+set.seed(1)
+X <- matrix(rnorm(200 * 5), 200, 5)
+Y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(200, sd = 0.5)
+sl <- SuperLearner(Y = Y, X = as.data.frame(X),
+                   SL.library = "SL.cudaGlmnet", family = gaussian())
+predict(sl, newdata = as.data.frame(X[1:5, ]))$pred
+```
+
+## mlr3
+
+When `mlr3` is installed, `.onLoad` registers an R6 class inheriting
+`mlr3::LearnerRegr` under the key `regr.cuda_glmnet`, whose `.train` calls
+`cuda_glmnet()` and whose `.predict` calls `predict()`. No change to mlr3 is
+needed; registration happens inside the downstream package.
+
+```{r mlr3-usage, eval = RUN_MLR3}
+library(mlr3)
+task <- as_task_regr(data.frame(y = Y, X), target = "y")
+learner <- lrn("regr.cuda_glmnet")
+learner$train(task)
+learner$predict(task)
+```
+
+## parsnip / tidymodels
+
+When `parsnip` is installed, `.onLoad` registers a `cuda_glmnet` engine via
+`set_new_model()` / `set_model_mode()` / `set_model_engine()` /
+`set_dependency()` / `set_fit()` / `set_pred()`. The parsnip model type is
+named `cuda_enet` on purpose: creating a model-spec function called
+`cuda_glmnet()` could otherwise shadow this package's own solver.
+
+```{r parsnip-usage, eval = RUN_PARSNIP}
+library(parsnip)
+model <- cuda_enet(mode = "regression", engine = "cuda_glmnet")
+```
+
+## Verification status and open work
+
+None of `mlr3`, `parsnip`, `tidymodels`, `SuperLearner` or `mlr3misc` is
+installed on the machine that produced this vignette. Consequently:
+
+- The SuperLearner-style `SL.cudaGlmnet()` fit-to-predict path **is** verified
+  locally, by `tests/testthat/test-engines.R` (it needs no SuperLearner
+  install).
+- The `mlr3` and `parsnip` registration code has been checked only
+  **structurally**: the guards are correct, the constructors have the expected
+  signatures, and `.onLoad` does not hard-fail. It has **not** been verified
+  end-to-end against the real frameworks.
+- The roadmap (section 9) acceptance criterion — at least one framework
+  running register -> CV -> predict and beating that framework's `glmnet`
+  engine — is therefore **not yet met** on this machine.
+
+CI that installs these frameworks should finish that end-to-end check and
+add real `skip_if_not_installed()` regression tests for each engine.

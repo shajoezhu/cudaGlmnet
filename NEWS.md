@@ -9,6 +9,27 @@
   the resolved `method` are returned. Strategy (`resident` / `cold`) stays
   orthogonal to method. `rcupp` itself remains algorithm-agnostic.
 
+* Add a dual / Woodbury wall-time comparison to the `subset-residency`
+  vignette: measured primal / dual ratios of 3.7x (`p = 1000, m = 120`) and
+  80.6x (`p = 3000, m = 150`); the gap grows with `p / m`, and `p < m`
+  correctly falls back to primal via `method = "auto"`. A snapshot, not a
+  guarantee.
+
+* Add optional P2 framework adapters: a SuperLearner `SL.cudaGlmnet`
+  wrapper (plus a `predict` method), and lazily-registered `mlr3` /
+  parsnip engines. The frameworks are `Suggests` only, guarded by
+  `requireNamespace` and `tryCatch` at load time. Gaussian-only and
+  `obsWeights` are documented limits. The `mlr3` / parsnip registrations are
+  not verified end-to-end on this machine (frameworks not installed); that is
+  left as a CI follow-up. Only the SuperLearner fit/predict path is exercised
+  by the local test suite.
+
+* Document the overlap with the separate `SLrcupp` package: `SL.rcupp` is a
+  standalone CV-based `SL.*` learner that selects `lambda.min` / `lambda.1se`
+  via `cv.cuda_glmnet()`, while `SL.cudaGlmnet` is the thin in-package wrapper
+  predicting at a single penalty. Both are kept intentionally; see the
+  `engines` vignette for the in-package adapters.
+
 * Development version bumped from 0.0.0.9012.
 
 # cudaGlmnet 0.0.0.9012

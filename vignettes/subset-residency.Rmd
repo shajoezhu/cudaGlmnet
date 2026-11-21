@@ -244,6 +244,63 @@ cat(sprintf("p=%d m=%d | method=%s sys_dim=%d | max|beta-exact|=%.2e\n",
             p, m, auto$method, auto$sys_dim, max_cf))
 ```
 
+### Dual vs primal wall time
+
+The dimension gap translates directly into wall time. The table below is a
+measured snapshot on the same GPU as the reference table above: one call
+fitting `B = 8` equal-size subsets under `strategy = "resident"`, one warm-up
+then the median of repeated `system.time()` runs, wall time in seconds. It is a
+snapshot, not a performance guarantee.
+
+| p | m | auto | dual (s) | primal (s) | primal / dual |
+|---|---|---|---|---|---|
+| 1000 | 120 | dual | 0.016 | 0.059 | 3.7x |
+| 3000 | 150 | dual | 0.018 | 1.450 | 80.6x |
+| 200 | 300 | primal | 0.106 | 0.121 | ~1.1x |
+
+The speedup is not a fixed constant. The primal `p x p` factorization is far
+more expensive than the dual `m x m` one, so the ratio grows with `p / m`: the
+`p = 3000` row is the production `p >> n` shape, while `p = 1000` shows the
+same effect at a smaller scale. When `p < m` the dual system is the larger one,
+the two times are comparable, and `auto` correctly picks primal. In every row
+both routes return the same betas to machine precision, as the correctness
+chunk above verifies.
+
+```{r dual-timing, eval = RUN}
+bench_method <- function(n, p, m, B, lambda = 0.1, reps = 2L) {
+  d <- make_data(n, p)
+  idx <- replicate(B, sample.int(n, m), simplify = FALSE)
+  t_dual <- time_median(function() {
+    cuda_resident_subsets(d$X, d$y, idx, lambda, "resident", "dual")
+  }, reps = reps)
+  t_primal <- time_median(function() {
+    cuda_resident_subsets(d$X, d$y, idx, lambda, "resident", "primal")
+  }, reps = reps)
+  a <- cuda_resident_subsets(d$X, d$y, idx[1], lambda, "resident", "auto")
+  data.frame(
+    p = p,
+    m = m,
+    auto = a$method,
+    sys_dim = a$sys_dim,
+    dual = sprintf("%.4f", t_dual),
+    primal = sprintf("%.4f", t_primal),
+    ratio = sprintf("%.1fx", t_primal / t_dual)
+  )
+}
+
+knitr::kable(
+  do.call(rbind, list(
+    bench_method(200L, 600L, 60L, 4L),
+    bench_method(400L, 200L, 300L, 4L)
+  )),
+  caption = "Dual vs primal wall time (seconds); one call fitting B subsets."
+)
+```
+
+The live chunk uses small panels and few repetitions to keep build time down,
+so its absolute numbers differ from the snapshot above; the reproducible
+signal is that dual wins when `p > m` and that `auto` picks the smaller system.
+
 ## Interpreting the numbers
 
 This is an empirical demonstration that keeping a matrix resident and

@@ -27,6 +27,10 @@ reference:
   - print.cuda_glmnet
   - print.cuda_lasso
   - print.cv.cuda_glmnet
+- title: Framework engines
+  contents:
+  - SL.cudaGlmnet
+  - predict.SL.cudaGlmnet
 
 articles:
 - title: Get started
@@ -42,3 +46,6 @@ articles:
 - title: Background
   contents:
   - gpu-lasso-comparison
+- title: Framework engines
+  contents:
+  - engines

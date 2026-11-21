@@ -13,13 +13,16 @@ Description: A glmnet-like interface for the Gaussian lasso and elastic net
     rcupp's resident device operators; rcupp itself stays algorithm-agnostic.
     The single fixed-lambda cuda_lasso() entry point is retained as the
     numerical reference path. Sparse x and other families are future work.
+    Optional adapters register GPU engines with mlr3, parsnip and
+    SuperLearner (all Suggests).
 License: Apache License 2.0
 Encoding: UTF-8
 Language: en-US
 Imports: rcupp (>= 0.1.0), stats, Rcpp
 LinkingTo: rcupp, Rcpp
 NeedsCompilation: yes
-Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml, glmnet
+Suggests: testthat (>= 3.0.0), knitr, rmarkdown, cuda.ml, glmnet, mlr3,
+    parsnip, SuperLearner, R6
 Remotes: shajoezhu/rcupp
 VignetteBuilder: knitr
 Config/testthat/edition: 3

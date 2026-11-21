@@ -91,6 +91,13 @@ max(abs(coef(ref) - lasso_fista_cpu(X, y, 0.05)$coefficients))  # ~0
   `alpha < 1` is composed downstream from rcupp resident device operators
   (rcupp itself stays algorithm-agnostic). Not yet: binomial, sparse `x`,
   closed-form / SVD ridge paths.
+- Optional framework adapters expose the Gaussian solver to mlr3, parsnip and
+  SuperLearner; all are `Suggests`-only, registered lazily at load time, and
+  Gaussian-only (`obsWeights` is ignored). See the `engines` vignette. A
+  standalone CV-based SuperLearner learner also lives in the separate
+  `SLrcupp` package (`SL.rcupp`), which selects `lambda.min` / `lambda.1se`
+  via `cv.cuda_glmnet()`; the in-package `SL.cudaGlmnet` is a thinner wrapper
+  predicting at a single penalty. Both are kept intentionally.
 - FISTA and glmnet's coordinate descent solve the **same objective** but use
   different algorithms and convergence criteria: the drop-in promises agreement
   within tolerance, not bit-for-bit reproduction of glmnet's solution path.
@@ -111,6 +118,7 @@ max(abs(coef(ref) - lasso_fista_cpu(X, y, 0.05)$coefficients))  # ~0
 | **cudaGlmnet** | glmnet-style GPU lasso / elastic-net front end (Rcpp + rcupp) | this repo |
 | cudaBio | PCA / GWAS power iteration (`p >> n`) downstream example | [github](https://github.com/shajoezhu/cudaBio) |
 | cudaFin | rolling-window lasso forecasting downstream example | [github](https://github.com/shajoezhu/cudaFin) |
+| SLrcupp | standalone CV-based SuperLearner `SL.*` adapter (`SL.rcupp`) | [github](https://github.com/shajoezhu/SLrcupp) |
 
 ## License
 
