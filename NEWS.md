@@ -1,3 +1,7 @@
+# cudaGlmnet 0.0.0.9015
+
+* Development version bumped from 0.0.0.9014.
+
 # cudaGlmnet 0.0.0.9014
 
 * Development version bumped from 0.0.0.9013.
