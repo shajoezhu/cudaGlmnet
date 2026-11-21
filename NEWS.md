@@ -1,3 +1,7 @@
+# cudaGlmnet 0.0.0.9016
+
+* Development version bumped from 0.0.0.9015.
+
 # cudaGlmnet 0.0.0.9015
 
 * **Part B / §9 half (2), qualified**: add an mlr3 learner
